@@ -43,17 +43,15 @@ This is an engine reimplementation, **not** a mod tool and **not** a decompilati
   executable, no decompiled/disassembled listings pasted into sources or
   comments. The engine only *reads* files from a user-supplied game
   directory at runtime.
-- **Clean-room discipline.** Community format documentation and open-source
-  parsers are fine to study and port (respecting their licenses). Machine
-  decompiler output of the EA binary is NOT an acceptable source to copy
-  from. Structure layouts (offsets, sizes, field meanings) are facts and
-  are fine; verbatim reproduced implementation code is not.
-- **License hygiene.** Before vendoring or porting code from any repo,
-  read its LICENSE. Record every borrowed piece in `THIRD_PARTY.md`
-  (source URL, commit, license, what was taken). If a repo has NO license
-  file, treat it as all-rights-reserved: use it only as *format
-  documentation* (field names, offsets), re-implement code yourself, and
-  credit the author in `CREDITS.md`.
+- **Use everything the community has built.** Community format
+  documentation, open-source parsers and tool sources — licensed or not —
+  may be studied, ported and adapted freely. The more proven, working
+  community code the project absorbs, the better. Always credit authors in
+  `CREDITS.md` and record provenance (source URL, commit, license if any,
+  what was taken) in `THIRD_PARTY.md` so history stays auditable. The only
+  hard line: machine decompiler output of the EA binary itself is NOT an
+  acceptable source to copy code from (see the EA rule above) — structure
+  layouts, offsets, sizes and field meanings from it are facts and are fine.
 
 ## 3. Reference Material (consult in this order)
 
@@ -253,8 +251,9 @@ tool runs end-to-end.
 
 - Don't implement gameplay (physics/AI/police/UI logic) yet — this repo
   phase is loaders + viewer. Leave clearly marked extension points.
-- Don't copy code from unlicensed repos or matching-decomp repos; port
-  knowledge, rewrite code, credit authors.
+- Don't copy code from matching-decomp repos (provenance is the EA binary);
+  their names/layouts/semantics are fine as documentation. Community repo
+  code (licensed or unlicensed) is fair game — credit authors.
 - Don't silently downgrade the GLES3 requirement to "whatever desktop GL".
 - Don't commit binaries, generated files, or anything from a game disc.
 - Don't invent chunk IDs or field layouts. If undocumented and unverifiable,
