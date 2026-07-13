@@ -112,7 +112,8 @@ void loadModelsFrom(core::ByteSpan span, ViewerAssets* assets) {
             Model model;
             model.name = obj.name;
             model.markers = obj.markers;
-            model.isWheel = obj.name.find("WHEEL") != std::string::npos;
+            model.isWheel = obj.name.find("WHEEL") != std::string::npos ||
+                            obj.name.find("TIRE") != std::string::npos;
             for (int i = 0; i < 3; ++i) {
                 model.boundsMin[i] = obj.boundsMin[i];
                 model.boundsMax[i] = obj.boundsMax[i];
@@ -373,7 +374,9 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
             return;
         }
         const std::string base = config.gameDir + "/CARS/" + cars[static_cast<std::size_t>(index)];
-        assets = loadAssets({base + "/GEOMETRY.BIN", base + "/TEXTURES.BIN"});
+        // GLOBALB.BUN carries shared car textures (windows, plates, driver).
+        assets = loadAssets({base + "/GEOMETRY.BIN", base + "/TEXTURES.BIN",
+                             config.gameDir + "/GLOBAL/GLOBALB.BUN"});
         modelSelected = assets.models.empty() ? -1 : 0;
         browserSelected = -1;
         carSelected = index;
@@ -523,11 +526,17 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
             // marker (its own, or borrowed from a visible body that has
             // markers). Marker matrices carry translation in row 3; the
             // row-vector convention matches GL column-major memory layout.
-            const std::vector<formats::PositionMarker>* donorMarkers = nullptr;
+            std::vector<formats::PositionMarker> wheelMarkers;
             for (int modelIdx : drawList) {
                 const Model& m = assets.models[static_cast<std::size_t>(modelIdx)];
                 if (!m.isWheel && m.markers.size() >= 4) {
-                    donorMarkers = &m.markers;
+                    wheelMarkers = m.markers;  // wheel slots have the widest |y|
+                    std::sort(wheelMarkers.begin(), wheelMarkers.end(),
+                              [](const formats::PositionMarker& a,
+                                 const formats::PositionMarker& b) {
+                                  return std::fabs(a.matrix[13]) > std::fabs(b.matrix[13]);
+                              });
+                    wheelMarkers.resize(4);
                     break;
                 }
             }
@@ -535,13 +544,9 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
             for (int modelIdx : drawList) {
                 const Model& model = assets.models[static_cast<std::size_t>(modelIdx)];
                 std::vector<const float*> instances;
-                if (placeWheels && model.isWheel) {
-                    const auto* markers =
-                        model.markers.size() >= 2 ? &model.markers : donorMarkers;
-                    if (markers) {
-                        for (const auto& marker : *markers) {
-                            instances.push_back(marker.matrix);
-                        }
+                if (placeWheels && model.isWheel && !wheelMarkers.empty()) {
+                    for (const auto& marker : wheelMarkers) {
+                        instances.push_back(marker.matrix);
                     }
                 }
                 if (instances.empty()) {
