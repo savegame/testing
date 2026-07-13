@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <dirent.h>
 #include <sys/stat.h>
 #include <unordered_map>
 #include <vector>
@@ -191,6 +192,41 @@ ViewerAssets loadAssets(const std::vector<std::string>& paths) {
     return assets;
 }
 
+// Lists CARS/<name> directories that contain a GEOMETRY.BIN.
+std::vector<std::string> listCarDirs(const std::string& gamedir) {
+    std::vector<std::string> cars;
+    const std::string carsRoot = gamedir + "/CARS";
+    DIR* dir = opendir(carsRoot.c_str());
+    if (!dir) {
+        return cars;
+    }
+    while (dirent* entry = readdir(dir)) {
+        const std::string name = entry->d_name;
+        if (name == "." || name == "..") {
+            continue;
+        }
+        struct stat st {};
+        if (stat((carsRoot + "/" + name + "/GEOMETRY.BIN").c_str(), &st) == 0) {
+            cars.push_back(name);
+        }
+    }
+    closedir(dir);
+    std::sort(cars.begin(), cars.end());
+    return cars;
+}
+
+// Car parts carry a trailing LOD letter: "..._KIT00_BASE_A" (A = highest).
+// Returns the letter or 0 when the name has no LOD suffix.
+char lodSuffix(const std::string& name) {
+    if (name.size() >= 2 && name[name.size() - 2] == '_') {
+        const char c = name.back();
+        if (c >= 'A' && c <= 'E') {
+            return c;
+        }
+    }
+    return 0;
+}
+
 // GLSL ES 3.00 scene shader: half-lambert, vertex color (BGRA in memory ->
 // swizzle), optional diffuse texture.
 const char* kSceneVs = R"(#version 300 es
@@ -293,6 +329,27 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
     int browserSelected = -1;
     int modelSelected = assets.models.empty() ? -1 : 0;
 
+    // Car browser state (auto-scanned from --gamedir).
+    std::vector<std::string> cars =
+        config.gameDir.empty() ? std::vector<std::string>() : listCarDirs(config.gameDir);
+    int carSelected = -1;
+    bool assembled = true;  // draw all parts of the chosen LOD vs one object
+    int lodIndex = 0;       // 0 = 'A' (highest detail) .. 3 = 'D'
+    float uiScale = config.uiScale;
+    bool needFrame = false;  // re-frame the camera on next draw-list build
+
+    auto loadCar = [&](int index) {
+        if (index < 0 || index >= static_cast<int>(cars.size())) {
+            return;
+        }
+        const std::string base = config.gameDir + "/CARS/" + cars[static_cast<std::size_t>(index)];
+        assets = loadAssets({base + "/GEOMETRY.BIN", base + "/TEXTURES.BIN"});
+        modelSelected = assets.models.empty() ? -1 : 0;
+        browserSelected = -1;
+        carSelected = index;
+        needFrame = true;
+    };
+
     core::Result<gfx::Shader> sceneShaderResult = gfx::Shader::compile(kSceneVs, kSceneFs);
     if (!sceneShaderResult) {
         return sceneShaderResult.error();
@@ -303,21 +360,48 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
     const int locHasTexture = sceneShader.uniformLocation("uHasTexture");
 
     gfx::OrbitCamera camera;
-    auto frameModel = [&camera, &assets](int index) {
-        if (index < 0 || index >= static_cast<int>(assets.models.size())) {
+    // Frames the camera on the union bounds of the given model indices.
+    auto frameModels = [&camera, &assets](const std::vector<int>& indices) {
+        if (indices.empty()) {
             return;
         }
-        const Model& m = assets.models[static_cast<std::size_t>(index)];
+        float mn[3] = {1e30f, 1e30f, 1e30f};
+        float mx[3] = {-1e30f, -1e30f, -1e30f};
+        for (int index : indices) {
+            const Model& m = assets.models[static_cast<std::size_t>(index)];
+            for (int i = 0; i < 3; ++i) {
+                mn[i] = std::min(mn[i], m.boundsMin[i]);
+                mx[i] = std::max(mx[i], m.boundsMax[i]);
+            }
+        }
         float diag = 0;
         for (int i = 0; i < 3; ++i) {
-            camera.target[i] = (m.boundsMin[i] + m.boundsMax[i]) * 0.5f;
-            const float d = m.boundsMax[i] - m.boundsMin[i];
+            camera.target[i] = (mn[i] + mx[i]) * 0.5f;
+            const float d = mx[i] - mn[i];
             diag += d * d;
         }
         diag = std::sqrt(diag);
         camera.distance = diag > 0.01f ? diag * 1.2f : 5.0f;
     };
-    frameModel(modelSelected);
+    // Models drawn this frame (assembled: all parts of the active LOD).
+    auto buildDrawList = [&]() {
+        std::vector<int> list;
+        if (assembled) {
+            const char lod = static_cast<char>('A' + lodIndex);
+            for (int i = 0; i < static_cast<int>(assets.models.size()); ++i) {
+                const char l =
+                    lodSuffix(assets.models[static_cast<std::size_t>(i)].name);
+                if (l == 0 || l == lod) {
+                    list.push_back(i);
+                }
+            }
+        } else if (modelSelected >= 0 &&
+                   modelSelected < static_cast<int>(assets.models.size())) {
+            list.push_back(modelSelected);
+        }
+        return list;
+    };
+    needFrame = !assets.models.empty();
     bool orbiting = false;
 
     OMW05_LOG_INFO("app", "viewer up: %dx%d physical, %dx%d logical, rotate=%d, scale=%.2f", physW,
@@ -394,8 +478,12 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
         glClearColor(0.08f, 0.12f, 0.20f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        if (modelSelected >= 0 && modelSelected < static_cast<int>(assets.models.size())) {
-            const Model& model = assets.models[static_cast<std::size_t>(modelSelected)];
+        const std::vector<int> drawList = buildDrawList();
+        if (needFrame) {
+            frameModels(drawList);
+            needFrame = false;
+        }
+        if (!drawList.empty()) {
             glEnable(GL_DEPTH_TEST);
             glDisable(GL_BLEND);
             sceneShader.use();
@@ -406,15 +494,18 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
             glUniformMatrix4fv(locViewProj, 1, GL_FALSE, viewProj);
             glUniform1i(locDiffuse, 0);
             glActiveTexture(GL_TEXTURE0);
-            for (const ModelPart& part : model.parts) {
-                auto it = assets.textureByHash.find(part.diffuseHash);
-                if (it != assets.textureByHash.end()) {
-                    glBindTexture(GL_TEXTURE_2D, it->second);
-                    glUniform1i(locHasTexture, 1);
-                } else {
-                    glUniform1i(locHasTexture, 0);
+            for (int modelIdx : drawList) {
+                const Model& model = assets.models[static_cast<std::size_t>(modelIdx)];
+                for (const ModelPart& part : model.parts) {
+                    auto it = assets.textureByHash.find(part.diffuseHash);
+                    if (it != assets.textureByHash.end()) {
+                        glBindTexture(GL_TEXTURE_2D, it->second);
+                        glUniform1i(locHasTexture, 1);
+                    } else {
+                        glUniform1i(locHasTexture, 0);
+                    }
+                    part.mesh.draw();
                 }
-                part.mesh.draw();
             }
             glDisable(GL_DEPTH_TEST);
         }
@@ -439,24 +530,52 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
             }
             ImGui::End();
 
+            ImGui::GetIO().FontGlobalScale = uiScale;
+
+            if (!cars.empty()) {  // car browser (auto-scanned from --gamedir)
+                ImGui::SetNextWindowPos(ImVec2(440, 10), ImGuiCond_FirstUseEver);
+                ImGui::SetNextWindowSize(ImVec2(260, 400), ImGuiCond_FirstUseEver);
+                ImGui::Begin("Cars");
+                for (int i = 0; i < static_cast<int>(cars.size()); ++i) {
+                    if (ImGui::Selectable(cars[static_cast<std::size_t>(i)].c_str(),
+                                          carSelected == i)) {
+                        loadCar(i);
+                    }
+                }
+                ImGui::End();
+            }
+
             if (!assets.models.empty()) {  // M3 model viewer controls
                 ImGui::SetNextWindowPos(ImVec2(10, 160), ImGuiCond_FirstUseEver);
                 ImGui::Begin("Model viewer");
-                const std::string& current =
-                    assets.models[static_cast<std::size_t>(modelSelected)].name;
-                if (ImGui::BeginCombo("object", current.c_str())) {
-                    for (int i = 0; i < static_cast<int>(assets.models.size()); ++i) {
-                        if (ImGui::Selectable(
-                                assets.models[static_cast<std::size_t>(i)].name.c_str(),
-                                modelSelected == i)) {
-                            modelSelected = i;
-                            frameModel(i);
-                        }
-                    }
-                    ImGui::EndCombo();
+                if (ImGui::Checkbox("assembled", &assembled)) {
+                    needFrame = true;
                 }
-                ImGui::Text("parts: %zu",
-                            assets.models[static_cast<std::size_t>(modelSelected)].parts.size());
+                if (assembled) {
+                    const char* lodNames[] = {"A (high)", "B", "C", "D (low)"};
+                    if (ImGui::Combo("LOD", &lodIndex, lodNames, 4)) {
+                        needFrame = true;
+                    }
+                } else {
+                    const std::string& current =
+                        modelSelected >= 0
+                            ? assets.models[static_cast<std::size_t>(modelSelected)].name
+                            : std::string("-");
+                    if (ImGui::BeginCombo("object", current.c_str())) {
+                        for (int i = 0; i < static_cast<int>(assets.models.size()); ++i) {
+                            if (ImGui::Selectable(
+                                    assets.models[static_cast<std::size_t>(i)].name.c_str(),
+                                    modelSelected == i)) {
+                                modelSelected = i;
+                                needFrame = true;
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+                }
+                ImGui::Text("objects: %zu, textures: %zu", assets.models.size(),
+                            assets.textures.size());
+                ImGui::SliderFloat("UI scale", &uiScale, 0.5f, 3.0f, "%.1f");
                 ImGui::Text("drag: orbit, wheel: zoom");
                 ImGui::End();
             }

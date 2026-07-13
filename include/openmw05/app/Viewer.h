@@ -26,6 +26,7 @@ struct ViewerConfig {
     // --screenshot: write a PNG of the composited output after a few frames
     // (debug/CI aid; the viewer keeps running).
     std::string screenshotPath;
+    float uiScale = 1.0f;  // --ui-scale: ImGui font scale (also a UI slider)
 };
 
 class Viewer {
