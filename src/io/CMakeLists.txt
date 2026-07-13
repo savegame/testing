@@ -2,6 +2,7 @@
 add_library(omw05_io STATIC
     ChunkIds.cpp
     ChunkReader.cpp
+    Compression.cpp
 )
 target_include_directories(omw05_io PUBLIC ${OMW05_INCLUDE_DIR})
 target_link_libraries(omw05_io PUBLIC omw05::core)
