@@ -3,6 +3,7 @@
 #include "openmw05/core/Log.h"
 #include "openmw05/core/Stream.h"
 #include "openmw05/formats/Solids.h"
+#include "openmw05/formats/TextureDecode.h"
 #include "openmw05/formats/TexturePack.h"
 #include "openmw05/gfx/Camera.h"
 #include "openmw05/gfx/DxtDecode.h"
@@ -82,36 +83,13 @@ void loadTexturesFrom(core::ByteSpan span, ViewerAssets* assets) {
         OMW05_LOG_ERROR("app", "--open textures: %s", packs.error().message.c_str());
         return;
     }
-    using TF = formats::TextureFormat;
     for (const auto& pack : packs.value()) {
         for (const auto& tex : pack.textures) {
-            std::vector<std::uint8_t> rgba;
-            switch (tex.textureFormat()) {
-            case TF::Dxt1:
-                rgba = gfx::decodeDxt(tex.data, tex.width, tex.height, 1);
-                break;
-            case TF::Dxt3:
-                rgba = gfx::decodeDxt(tex.data, tex.width, tex.height, 3);
-                break;
-            case TF::Dxt5:
-                rgba = gfx::decodeDxt(tex.data, tex.width, tex.height, 5);
-                break;
-            case TF::Rgba32:
-                if (tex.data.size() >= static_cast<std::size_t>(tex.width) * tex.height * 4) {
-                    rgba.assign(tex.data.begin(),
-                                tex.data.begin() +
-                                    static_cast<std::size_t>(tex.width) * tex.height * 4);
-                    for (std::size_t i = 0; i + 3 < rgba.size(); i += 4) {  // BGRA -> RGBA
-                        std::swap(rgba[i], rgba[i + 2]);
-                    }
-                }
-                break;
-            default:
-                OMW05_LOG_DEBUG("app", "skip '%s': unsupported format %u", tex.name.c_str(),
-                                tex.format);
-                break;
-            }
+            std::vector<std::uint8_t> rgba = formats::decodeTextureRgba(tex);
             if (rgba.empty()) {
+                OMW05_LOG_WARN("app", "texture '%s' (0x%08X): undecoded format %s (%u)",
+                               tex.name.c_str(), tex.nameHash,
+                               formats::textureFormatName(tex.textureFormat()), tex.format);
                 continue;
             }
             auto gl = gfx::Texture::createRgba8(tex.width, tex.height, rgba.data());
@@ -351,10 +329,41 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
         }
         needFrame = true;
     };
+    // Preset: a plausible stock car — KIT00 parts at LOD A plus wheels,
+    // skipping STYLE*/DAMAGE variants and decal/spoiler extras. The real
+    // stock configuration lives in the VLT database (M5); heuristic until
+    // then.
+    auto applyStockPreset = [&]() {
+        bool hoodPicked = false;
+        for (std::size_t i = 0; i < assets.models.size(); ++i) {
+            const std::string& n = assets.models[i].name;
+            const char l = lodSuffix(n);
+            bool on = false;
+            if ((l == 'A' || l == 0) && n.find("DAMAGE") == std::string::npos &&
+                n.find("STYLE") == std::string::npos) {
+                if (assets.models[i].isWheel) {
+                    on = true;
+                } else if (n.find("_KIT00_") != std::string::npos) {
+                    const bool isHood = n.find("HOOD") != std::string::npos;
+                    const bool isExtra = n.find("DECAL") != std::string::npos ||
+                                         n.find("SPOILER") != std::string::npos ||
+                                         n.find("ROOF") != std::string::npos;
+                    if (isHood) {
+                        on = !hoodPicked;  // exactly one hood
+                        hoodPicked = hoodPicked || on;
+                    } else {
+                        on = !isExtra;
+                    }
+                }
+            }
+            visible[i] = on ? 1 : 0;
+        }
+        needFrame = true;
+    };
     auto resetVisibility = [&]() {
         visible.assign(assets.models.size(), 0);
         if (!assets.models.empty()) {
-            applyLodPreset('A');
+            applyStockPreset();
         }
     };
     resetVisibility();
@@ -584,10 +593,12 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
                 ImGui::SetNextWindowSize(ImVec2(260, 400), ImGuiCond_FirstUseEver);
                 ImGui::Begin("Cars");
                 for (int i = 0; i < static_cast<int>(cars.size()); ++i) {
+                    ImGui::PushID(i);
                     if (ImGui::Selectable(cars[static_cast<std::size_t>(i)].c_str(),
                                           carSelected == i)) {
                         loadCar(i);
                     }
+                    ImGui::PopID();
                 }
                 ImGui::End();
             }
@@ -596,6 +607,10 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
                 ImGui::SetNextWindowPos(ImVec2(10, 160), ImGuiCond_FirstUseEver);
                 ImGui::SetNextWindowSize(ImVec2(360, 460), ImGuiCond_FirstUseEver);
                 ImGui::Begin("Model viewer");
+                if (ImGui::Button("Stock")) {
+                    applyStockPreset();
+                }
+                ImGui::SameLine();
                 if (ImGui::Button("LOD A")) {
                     applyLodPreset('A');
                 }
@@ -627,9 +642,11 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
                     char label[160];
                     std::snprintf(label, sizeof label, "%s (%zu parts, %zu markers)",
                                   m.name.c_str(), m.parts.size(), m.markers.size());
+                    ImGui::PushID(i);  // object names can repeat across packs
                     if (ImGui::Checkbox(label, &on)) {
                         visible[static_cast<std::size_t>(i)] = on ? 1 : 0;
                     }
+                    ImGui::PopID();
                 }
                 ImGui::EndChild();
                 ImGui::End();
@@ -641,11 +658,13 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
                 ImGui::Begin("Texture browser");
                 ImGui::BeginChild("list", ImVec2(180, 0), ImGuiChildFlags_ResizeX);
                 for (int i = 0; i < static_cast<int>(assets.textures.size()); ++i) {
+                    ImGui::PushID(i);  // labels repeat when packs share names
                     if (ImGui::Selectable(
                             assets.textures[static_cast<std::size_t>(i)].label.c_str(),
                             browserSelected == i)) {
                         browserSelected = i;
                     }
+                    ImGui::PopID();
                 }
                 ImGui::EndChild();
                 ImGui::SameLine();

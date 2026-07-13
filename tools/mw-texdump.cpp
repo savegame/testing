@@ -7,6 +7,7 @@
 //   --decompress  decompress a JDLZ/RefPack outer stream first
 
 #include "openmw05/core/Stream.h"
+#include "openmw05/formats/TextureDecode.h"
 #include "openmw05/formats/TexturePack.h"
 #include "openmw05/gfx/DxtDecode.h"
 #include "openmw05/io/Compression.h"
@@ -20,25 +21,6 @@
 #include <stb_image_write.h>
 
 namespace {
-
-const char* formatName(omw05::formats::TextureFormat f) {
-    using TF = omw05::formats::TextureFormat;
-    switch (f) {
-    case TF::P4: return "P4";
-    case TF::P8: return "P8";
-    case TF::Rgb16: return "RGB16";
-    case TF::Rgba16_1555: return "RGBA1555";
-    case TF::Rgb16_565: return "RGB565";
-    case TF::Rgba16_3555: return "RGBA3555";
-    case TF::Rgb24: return "RGB24";
-    case TF::Rgba32: return "RGBA32";
-    case TF::Dxt1: return "DXT1";
-    case TF::Dxt3: return "DXT3";
-    case TF::Dxt5: return "DXT5";
-    case TF::L8: return "L8";
-    default: return "?";
-    }
-}
 
 bool writePng(const std::string& path, const std::vector<std::uint8_t>& rgba, int w, int h) {
     return stbi_write_png(path.c_str(), w, h, 4, rgba.data(), w * 4) != 0;
@@ -107,31 +89,12 @@ int main(int argc, char** argv) {
                     pack.filename.c_str(), pack.key, pack.textures.size());
         for (const auto& tex : pack.textures) {
             std::printf("  %-24s 0x%08X %4ux%-4u %-8s mips=%u size=%u\n", tex.name.c_str(),
-                        tex.nameHash, tex.width, tex.height, formatName(tex.textureFormat()),
+                        tex.nameHash, tex.width, tex.height, omw05::formats::textureFormatName(tex.textureFormat()),
                         tex.mipmaps, tex.dataSize);
             if (!outDir) {
                 continue;
             }
-            using TF = omw05::formats::TextureFormat;
-            std::vector<std::uint8_t> rgba;
-            const TF f = tex.textureFormat();
-            if (f == TF::Dxt1) {
-                rgba = omw05::gfx::decodeDxt(tex.data, tex.width, tex.height, 1);
-            } else if (f == TF::Dxt3) {
-                rgba = omw05::gfx::decodeDxt(tex.data, tex.width, tex.height, 3);
-            } else if (f == TF::Dxt5) {
-                rgba = omw05::gfx::decodeDxt(tex.data, tex.width, tex.height, 5);
-            } else if (f == TF::Rgba32 &&
-                       tex.data.size() >= static_cast<std::size_t>(tex.width) * tex.height * 4) {
-                rgba.assign(tex.data.begin(),
-                            tex.data.begin() + static_cast<std::size_t>(tex.width) * tex.height * 4);
-                for (std::size_t i = 0; i + 3 < rgba.size(); i += 4) {  // BGRA -> RGBA
-                    std::swap(rgba[i], rgba[i + 2]);
-                }
-            } else {
-                ++skipped;
-                continue;
-            }
+            std::vector<std::uint8_t> rgba = omw05::formats::decodeTextureRgba(tex);
             if (rgba.empty()) {
                 ++skipped;
                 continue;
