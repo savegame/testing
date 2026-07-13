@@ -208,7 +208,9 @@ TEST_CASE("parseTexturePacks reads a compressed pack via InfoPart3 offslots") {
     putLe32(info, static_cast<std::uint32_t>(part1.size()));
     info.insert(info.end(), part1.begin(), part1.end());
     const std::size_t infoBlockSize = 8 + info.size() + 8 + 0x18;  // + InfoPart3 chunk
-    const std::uint32_t absOffset = static_cast<std::uint32_t>(infoBlockSize + 8);  // in DataBlock
+    // Offsets are relative to the TPKBlocks wrapper header: wrapper header
+    // (8) + InfoBlock chunk + DataBlock header (8).
+    const std::uint32_t absOffset = static_cast<std::uint32_t>(8 + infoBlockSize + 8);
     putLe32(info, 0x33310003);
     putLe32(info, 0x18);
     putLe32(info, 0xFEED0001);  // key
@@ -221,13 +223,18 @@ TEST_CASE("parseTexturePacks reads a compressed pack via InfoPart3 offslots") {
     info.push_back(0);          // refcount
     putLe32(info, 0);
 
-    std::vector<std::uint8_t> file;
-    putLe32(file, 0xB3310000);
-    putLe32(file, static_cast<std::uint32_t>(info.size()));
-    file.insert(file.end(), info.begin(), info.end());
-    putLe32(file, 0xB3320000);
-    putLe32(file, static_cast<std::uint32_t>(blob.size()));
-    file.insert(file.end(), blob.begin(), blob.end());
+    std::vector<std::uint8_t> inner;
+    putLe32(inner, 0xB3310000);
+    putLe32(inner, static_cast<std::uint32_t>(info.size()));
+    inner.insert(inner.end(), info.begin(), info.end());
+    putLe32(inner, 0xB3320000);
+    putLe32(inner, static_cast<std::uint32_t>(blob.size()));
+    inner.insert(inner.end(), blob.begin(), blob.end());
+
+    std::vector<std::uint8_t> file;  // TPKBlocks wrapper, like real bundles
+    putLe32(file, 0xB3300000);
+    putLe32(file, static_cast<std::uint32_t>(inner.size()));
+    file.insert(file.end(), inner.begin(), inner.end());
 
     auto result = formats::parseTexturePacks(core::ByteSpan(file.data(), file.size()));
     REQUIRE(result.ok());

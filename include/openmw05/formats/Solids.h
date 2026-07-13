@@ -55,6 +55,16 @@ struct SolidMaterial {
     std::vector<std::uint16_t> indices;  // triangle list into the vertex set
 };
 
+// 0x0013401A entry (0x50 bytes; decomp ePositionMarker): attachment points
+// baked into the object (wheel positions on cars, exhausts, etc.).
+struct PositionMarker {
+    std::uint32_t nameHash = 0;
+    std::int32_t iParam = 0;
+    float fParam0 = 0;
+    float fParam1 = 0;
+    float matrix[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};  // translation in row 3
+};
+
 struct SolidObject {
     std::string name;
     std::uint32_t hash = 0;  // binHash of name
@@ -64,6 +74,7 @@ struct SolidObject {
     std::vector<std::uint32_t> textureHashes;
     std::vector<SolidMaterial> materials;
     std::vector<std::vector<SolidVertex>> vertexSets;
+    std::vector<PositionMarker> markers;
 };
 
 struct SolidList {

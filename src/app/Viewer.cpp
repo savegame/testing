@@ -66,6 +66,8 @@ struct Model {
     float boundsMax[3];
     std::vector<gfx::VertexBuffer> vertexBuffers;
     std::vector<ModelPart> parts;
+    std::vector<formats::PositionMarker> markers;
+    bool isWheel = false;  // name contains "WHEEL": replicated over markers
 };
 
 struct ViewerAssets {
@@ -131,6 +133,8 @@ void loadModelsFrom(core::ByteSpan span, ViewerAssets* assets) {
         for (const auto& obj : list.objects) {
             Model model;
             model.name = obj.name;
+            model.markers = obj.markers;
+            model.isWheel = obj.name.find("WHEEL") != std::string::npos;
             for (int i = 0; i < 3; ++i) {
                 model.boundsMin[i] = obj.boundsMin[i];
                 model.boundsMax[i] = obj.boundsMax[i];
@@ -236,12 +240,13 @@ layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec4 aColor;  // B,G,R,A byte order
 layout(location = 3) in vec2 aUv;
 uniform mat4 uViewProj;
+uniform mat4 uModel;
 out vec3 vNormal;
 out vec4 vColor;
 out vec2 vUv;
 void main() {
-    gl_Position = uViewProj * vec4(aPos, 1.0);
-    vNormal = aNormal;
+    gl_Position = uViewProj * uModel * vec4(aPos, 1.0);
+    vNormal = mat3(uModel) * aNormal;
     vColor = vec4(aColor.zyx, aColor.w);
     vUv = aUv;
 }
@@ -333,10 +338,26 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
     std::vector<std::string> cars =
         config.gameDir.empty() ? std::vector<std::string>() : listCarDirs(config.gameDir);
     int carSelected = -1;
-    bool assembled = true;  // draw all parts of the chosen LOD vs one object
-    int lodIndex = 0;       // 0 = 'A' (highest detail) .. 3 = 'D'
     float uiScale = config.uiScale;
-    bool needFrame = false;  // re-frame the camera on next draw-list build
+    bool needFrame = false;   // re-frame the camera on next draw-list build
+    bool placeWheels = true;  // replicate WHEEL models over position markers
+    std::vector<char> visible;  // per-model draw checkbox state
+
+    // Preset: show only parts of one LOD (plus suffixless objects).
+    auto applyLodPreset = [&](char lod) {
+        for (std::size_t i = 0; i < assets.models.size(); ++i) {
+            const char l = lodSuffix(assets.models[i].name);
+            visible[i] = (l == 0 || l == lod) ? 1 : 0;
+        }
+        needFrame = true;
+    };
+    auto resetVisibility = [&]() {
+        visible.assign(assets.models.size(), 0);
+        if (!assets.models.empty()) {
+            applyLodPreset('A');
+        }
+    };
+    resetVisibility();
 
     auto loadCar = [&](int index) {
         if (index < 0 || index >= static_cast<int>(cars.size())) {
@@ -347,7 +368,7 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
         modelSelected = assets.models.empty() ? -1 : 0;
         browserSelected = -1;
         carSelected = index;
-        needFrame = true;
+        resetVisibility();
     };
 
     core::Result<gfx::Shader> sceneShaderResult = gfx::Shader::compile(kSceneVs, kSceneFs);
@@ -356,8 +377,10 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
     }
     gfx::Shader sceneShader = sceneShaderResult.take();
     const int locViewProj = sceneShader.uniformLocation("uViewProj");
+    const int locModel = sceneShader.uniformLocation("uModel");
     const int locDiffuse = sceneShader.uniformLocation("uDiffuse");
     const int locHasTexture = sceneShader.uniformLocation("uHasTexture");
+    static const float kIdentity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
 
     gfx::OrbitCamera camera;
     // Frames the camera on the union bounds of the given model indices.
@@ -383,21 +406,13 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
         diag = std::sqrt(diag);
         camera.distance = diag > 0.01f ? diag * 1.2f : 5.0f;
     };
-    // Models drawn this frame (assembled: all parts of the active LOD).
+    // Models drawn this frame = the checked ones.
     auto buildDrawList = [&]() {
         std::vector<int> list;
-        if (assembled) {
-            const char lod = static_cast<char>('A' + lodIndex);
-            for (int i = 0; i < static_cast<int>(assets.models.size()); ++i) {
-                const char l =
-                    lodSuffix(assets.models[static_cast<std::size_t>(i)].name);
-                if (l == 0 || l == lod) {
-                    list.push_back(i);
-                }
+        for (int i = 0; i < static_cast<int>(assets.models.size()); ++i) {
+            if (visible[static_cast<std::size_t>(i)]) {
+                list.push_back(i);
             }
-        } else if (modelSelected >= 0 &&
-                   modelSelected < static_cast<int>(assets.models.size())) {
-            list.push_back(modelSelected);
         }
         return list;
     };
@@ -494,17 +509,48 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
             glUniformMatrix4fv(locViewProj, 1, GL_FALSE, viewProj);
             glUniform1i(locDiffuse, 0);
             glActiveTexture(GL_TEXTURE0);
+
+            // Wheel placement: a WHEEL model is drawn once per position
+            // marker (its own, or borrowed from a visible body that has
+            // markers). Marker matrices carry translation in row 3; the
+            // row-vector convention matches GL column-major memory layout.
+            const std::vector<formats::PositionMarker>* donorMarkers = nullptr;
+            for (int modelIdx : drawList) {
+                const Model& m = assets.models[static_cast<std::size_t>(modelIdx)];
+                if (!m.isWheel && m.markers.size() >= 4) {
+                    donorMarkers = &m.markers;
+                    break;
+                }
+            }
+
             for (int modelIdx : drawList) {
                 const Model& model = assets.models[static_cast<std::size_t>(modelIdx)];
-                for (const ModelPart& part : model.parts) {
-                    auto it = assets.textureByHash.find(part.diffuseHash);
-                    if (it != assets.textureByHash.end()) {
-                        glBindTexture(GL_TEXTURE_2D, it->second);
-                        glUniform1i(locHasTexture, 1);
-                    } else {
-                        glUniform1i(locHasTexture, 0);
+                std::vector<const float*> instances;
+                if (placeWheels && model.isWheel) {
+                    const auto* markers =
+                        model.markers.size() >= 2 ? &model.markers : donorMarkers;
+                    if (markers) {
+                        for (const auto& marker : *markers) {
+                            instances.push_back(marker.matrix);
+                        }
                     }
-                    part.mesh.draw();
+                }
+                if (instances.empty()) {
+                    instances.push_back(kIdentity);
+                }
+
+                for (const float* transform : instances) {
+                    glUniformMatrix4fv(locModel, 1, GL_FALSE, transform);
+                    for (const ModelPart& part : model.parts) {
+                        auto it = assets.textureByHash.find(part.diffuseHash);
+                        if (it != assets.textureByHash.end()) {
+                            glBindTexture(GL_TEXTURE_2D, it->second);
+                            glUniform1i(locHasTexture, 1);
+                        } else {
+                            glUniform1i(locHasTexture, 0);
+                        }
+                        part.mesh.draw();
+                    }
                 }
             }
             glDisable(GL_DEPTH_TEST);
@@ -523,6 +569,7 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
             int rotDeg = static_cast<int>(rotation);
             ImGui::Text("rotation: %d deg (F2)", rotDeg);
             ImGui::SliderFloat("render scale (F1)", &renderScale, 0.25f, 1.0f, "%.2f");
+            ImGui::SliderFloat("UI scale", &uiScale, 0.5f, 3.0f, "%.1f");
             if (config.gameDir.empty()) {
                 ImGui::TextDisabled("no --gamedir set");
             } else {
@@ -547,36 +594,44 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
 
             if (!assets.models.empty()) {  // M3 model viewer controls
                 ImGui::SetNextWindowPos(ImVec2(10, 160), ImGuiCond_FirstUseEver);
+                ImGui::SetNextWindowSize(ImVec2(360, 460), ImGuiCond_FirstUseEver);
                 ImGui::Begin("Model viewer");
-                if (ImGui::Checkbox("assembled", &assembled)) {
+                if (ImGui::Button("LOD A")) {
+                    applyLodPreset('A');
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("LOD B")) {
+                    applyLodPreset('B');
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("All")) {
+                    std::fill(visible.begin(), visible.end(), char(1));
                     needFrame = true;
                 }
-                if (assembled) {
-                    const char* lodNames[] = {"A (high)", "B", "C", "D (low)"};
-                    if (ImGui::Combo("LOD", &lodIndex, lodNames, 4)) {
-                        needFrame = true;
-                    }
-                } else {
-                    const std::string& current =
-                        modelSelected >= 0
-                            ? assets.models[static_cast<std::size_t>(modelSelected)].name
-                            : std::string("-");
-                    if (ImGui::BeginCombo("object", current.c_str())) {
-                        for (int i = 0; i < static_cast<int>(assets.models.size()); ++i) {
-                            if (ImGui::Selectable(
-                                    assets.models[static_cast<std::size_t>(i)].name.c_str(),
-                                    modelSelected == i)) {
-                                modelSelected = i;
-                                needFrame = true;
-                            }
-                        }
-                        ImGui::EndCombo();
-                    }
+                ImGui::SameLine();
+                if (ImGui::Button("None")) {
+                    std::fill(visible.begin(), visible.end(), char(0));
                 }
+                ImGui::SameLine();
+                if (ImGui::Button("Frame")) {
+                    needFrame = true;
+                }
+                ImGui::Checkbox("place wheels at markers", &placeWheels);
                 ImGui::Text("objects: %zu, textures: %zu", assets.models.size(),
                             assets.textures.size());
-                ImGui::SliderFloat("UI scale", &uiScale, 0.5f, 3.0f, "%.1f");
-                ImGui::Text("drag: orbit, wheel: zoom");
+                ImGui::Separator();
+                ImGui::BeginChild("modelchecks");
+                for (int i = 0; i < static_cast<int>(assets.models.size()); ++i) {
+                    const Model& m = assets.models[static_cast<std::size_t>(i)];
+                    bool on = visible[static_cast<std::size_t>(i)] != 0;
+                    char label[160];
+                    std::snprintf(label, sizeof label, "%s (%zu parts, %zu markers)",
+                                  m.name.c_str(), m.parts.size(), m.markers.size());
+                    if (ImGui::Checkbox(label, &on)) {
+                        visible[static_cast<std::size_t>(i)] = on ? 1 : 0;
+                    }
+                }
+                ImGui::EndChild();
                 ImGui::End();
             }
 

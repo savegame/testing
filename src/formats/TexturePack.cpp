@@ -269,17 +269,28 @@ void parseCompressedTextures(core::ByteSpan file, std::size_t infoBlockOffset,
 core::Result<std::vector<TexturePack>> parseTexturePacks(core::ByteSpan file) {
     std::vector<TexturePack> packs;
     bool awaitingData = false;
+    // Compressed-pack offsets are relative to the enclosing TPKBlocks
+    // (0xB3300000) wrapper header (Nikki positions the reader there before
+    // TPKBlock.Disassemble). Standalone InfoBlocks fall back to their own
+    // offset.
+    std::size_t wrapperOffset = 0;
+    std::size_t wrapperEnd = 0;
 
     core::Result<void> walk = io::walkChunks(file, [&](const io::Chunk& c, int) {
         switch (static_cast<io::ChunkId>(c.id)) {
+        case io::ChunkId::TPKBlocks:
+            wrapperOffset = c.fileOffset;
+            wrapperEnd = c.fileOffset + 8 + c.data.size();
+            return true;
         case io::ChunkId::TPK_InfoBlock: {
             packs.emplace_back();
             InfoBlockData info;
             parseInfoBlock(c.data, &packs.back(), &info);
             if (!info.offSlots.empty()) {
-                // Compressed pack: blobs live relative to this chunk header
-                // (possibly inside the following data block).
-                parseCompressedTextures(file, c.fileOffset, info.offSlots, &packs.back());
+                const bool wrapped =
+                    c.fileOffset >= wrapperOffset && c.fileOffset < wrapperEnd;
+                parseCompressedTextures(file, wrapped ? wrapperOffset : c.fileOffset,
+                                        info.offSlots, &packs.back());
                 awaitingData = false;
             } else {
                 awaitingData = true;

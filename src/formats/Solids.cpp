@@ -281,6 +281,22 @@ SolidObject parseSolidObject(const io::Chunk& container) {
         case 0x00134012:
             parseTextureTable(c, &obj);
             break;
+        case 0x0013401A: {  // position markers, 0x50 each (ePositionMarker)
+            core::Stream ms(c.data.subspan(alignPad(c.fileOffset + 8, 0x10)));
+            const std::size_t count = ms.remaining() / 0x50;
+            for (std::size_t i = 0; i < count; ++i) {
+                PositionMarker marker;
+                marker.nameHash = ms.u32();
+                marker.iParam = ms.i32();
+                marker.fParam0 = ms.f32();
+                marker.fParam1 = ms.f32();
+                for (int j = 0; j < 16; ++j) {
+                    marker.matrix[j] = ms.f32();
+                }
+                obj.markers.push_back(marker);
+            }
+            break;
+        }
         case 0x80134100:  // mesh ("plat") container
             (void)io::forEachChunk(c.data, c.fileOffset + 8, [&](const io::Chunk& mc) {
                 switch (mc.id) {
