@@ -6,4 +6,4 @@ are credited in `CREDITS.md` and cited inline in headers/docs.
 
 | Component | Source | Commit/Version | License | What was taken |
 |---|---|---|---|---|
-| _(none yet)_ | | | | |
+| Dear ImGui | https://github.com/ocornut/imgui | v1.91.9b (f5befd2d29e66809cd1110a152e375a7f1981f06) | MIT | Core library + SDL2 platform backend + OpenGL3/GLES3 renderer backend, vendored in `extern/imgui/` |
