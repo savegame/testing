@@ -27,6 +27,9 @@ struct ViewerConfig {
     // (debug/CI aid; the viewer keeps running).
     std::string screenshotPath;
     float uiScale = 1.0f;  // --ui-scale: ImGui font scale (also a UI slider)
+    // --world [id]: M4 streamed world mode (requires --gamedir). Track id
+    // defaults to L2RA (Rockport free roam).
+    std::string worldTrack;
 };
 
 class Viewer {

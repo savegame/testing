@@ -76,14 +76,22 @@ int main(int argc, char** argv) {
 
     LoadedFile geom;
     LoadedFile tex;
+    LoadedFile global;
     if (!load(geomPath, &geom) || !load(texPath, &tex)) {
         return 1;
     }
+    const bool hasGlobal =
+        gamedir && load(std::string(gamedir) + "/GLOBAL/GLOBALB.BUN", &global);
 
     // --- Textures ---------------------------------------------------------
     std::map<std::uint32_t, std::string> textureNames;
     std::map<std::uint32_t, bool> textureDecodable;
-    auto packs = omw05::formats::parseTexturePacks(tex.span());
+    std::vector<omw05::core::ByteSpan> texSources = {tex.span()};
+    if (hasGlobal) {
+        texSources.push_back(global.span());
+    }
+    for (omw05::core::ByteSpan source : texSources) {
+    auto packs = omw05::formats::parseTexturePacks(source);
     if (packs) {
         for (const auto& pack : packs.value()) {
             std::printf("pack '%s' (%s): %zu textures\n", pack.name.c_str(),
@@ -98,6 +106,7 @@ int main(int argc, char** argv) {
                             t.paletteSize, ok ? "ok" : "UNDECODED");
             }
         }
+    }
     }
 
     // --- Geometry ---------------------------------------------------------
@@ -155,6 +164,6 @@ int main(int argc, char** argv) {
             }
         }
     }
-    std::printf("%d material(s) reference textures missing from this TEXTURES.BIN\n", missing);
+    std::printf("%d material(s) reference textures missing from TEXTURES.BIN+GLOBALB\n", missing);
     return 0;
 }

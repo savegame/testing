@@ -15,6 +15,7 @@ void printUsage() {
         "usage: omw05-viewer [options]\n"
         "  --gamedir <path>       NFS:MW (2005, PC) install dir (env OMW05_GAMEDIR)\n"
         "  --open <file>          load a chunked file (textures/geometry); repeatable\n"
+        "  --world [id]           streamed world mode (default track L2RA)\n"
         "  --ui-scale <f>         ImGui font scale, 0.5..4.0 (default 1)\n"
         "  --rotate <0|90|180|270> presentation rotation (env OMW05_ROTATE)\n"
         "  --render-scale <f>     3D render scale, 0.25..1.0 (UI stays native)\n"
@@ -71,6 +72,13 @@ int main(int argc, char** argv) {
         } else if (!std::strcmp(arg, "--open") && value) {
             config.openFiles.push_back(value);
             ++i;
+        } else if (!std::strcmp(arg, "--world")) {
+            if (value && std::strncmp(value, "--", 2) != 0) {
+                config.worldTrack = value;
+                ++i;
+            } else {
+                config.worldTrack = "L2RA";
+            }
         } else if (!std::strcmp(arg, "--ui-scale") && value) {
             config.uiScale = static_cast<float>(std::atof(value));
             if (config.uiScale < 0.5f || config.uiScale > 4.0f) {

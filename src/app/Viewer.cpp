@@ -5,6 +5,7 @@
 #include "openmw05/formats/Solids.h"
 #include "openmw05/formats/TextureDecode.h"
 #include "openmw05/formats/TexturePack.h"
+#include "openmw05/formats/TrackStreamer.h"
 #include "openmw05/gfx/Camera.h"
 #include "openmw05/gfx/DxtDecode.h"
 #include "openmw05/gfx/GlContext.h"
@@ -25,6 +26,7 @@
 #include <cmath>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
@@ -208,6 +210,78 @@ char lodSuffix(const std::string& name) {
         }
     }
     return 0;
+}
+
+// --- M4 world mode: streamed Rockport with a free-fly camera. -------------
+
+struct WorldInstance {
+    int modelIndex;
+    float transform[16];  // column-major (row-vector file layout matches)
+};
+
+struct WorldSection {
+    ViewerAssets assets;
+    std::unordered_map<std::uint32_t, int> modelByHash;
+    std::vector<WorldInstance> instances;
+};
+
+// Loads one streaming section: its texture packs, solids and scenery
+// placements (LOD A model per scenery info).
+WorldSection loadWorldSection(const formats::TrackStreamer& ts,
+                              const formats::StreamingSection& sec) {
+    WorldSection out;
+    auto data = ts.loadSection(sec);
+    if (!data) {
+        OMW05_LOG_WARN("app", "section %s: %s", sec.name.c_str(),
+                       data.error().message.c_str());
+        return out;
+    }
+    core::ByteSpan span(data.value().data(), data.value().size());
+    loadTexturesFrom(span, &out.assets);
+    loadModelsFrom(span, &out.assets);
+    // solid hash -> model index (loadModelsFrom keeps object order)
+    auto solids = formats::parseSolidLists(span);
+    if (solids) {
+        int idx = 0;
+        for (const auto& list : solids.value()) {
+            for (const auto& obj : list.objects) {
+                if (obj.materials.empty()) {
+                    continue;  // skipped by loadModelsFrom
+                }
+                out.modelByHash[obj.hash] = idx++;
+            }
+        }
+    }
+    auto scenery = formats::parseScenerySections(span);
+    if (scenery) {
+        for (const auto& sc : scenery.value()) {
+            for (const auto& inst : sc.instances) {
+                if (inst.sceneryInfoNumber < 0 ||
+                    static_cast<std::size_t>(inst.sceneryInfoNumber) >= sc.infos.size()) {
+                    continue;
+                }
+                const formats::SceneryInfo& info =
+                    sc.infos[static_cast<std::size_t>(inst.sceneryInfoNumber)];
+                auto it = out.modelByHash.find(info.modelHash[0]);
+                if (it == out.modelByHash.end()) {
+                    continue;  // model lives in another section/global bundle
+                }
+                WorldInstance wi;
+                wi.modelIndex = it->second;
+                const float* r = inst.rotation;
+                const float* p = inst.position;
+                const float m[16] = {r[0], r[1], r[2], 0, r[3], r[4], r[5], 0,
+                                     r[6], r[7], r[8], 0, p[0], p[1], p[2], 1};
+                for (int i = 0; i < 16; ++i) {
+                    wi.transform[i] = m[i];
+                }
+                out.instances.push_back(wi);
+            }
+        }
+    }
+    OMW05_LOG_INFO("app", "section %s: %zu models, %zu instances", sec.name.c_str(),
+                   out.assets.models.size(), out.instances.size());
+    return out;
 }
 
 // GLSL ES 3.00 scene shader: half-lambert, vertex color (BGRA in memory ->
@@ -435,6 +509,26 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
     needFrame = !assets.models.empty();
     bool orbiting = false;
 
+    // --- M4 world state ---------------------------------------------------
+    std::unique_ptr<formats::TrackStreamer> world;
+    ViewerAssets worldGlobal;  // master-bundle textures shared by sections
+    std::unordered_map<int, WorldSection> worldSections;
+    float flyPos[3] = {0, 0, 60};
+    float flyYaw = 0;
+    float flyPitch = -0.4f;
+    float flySpeed = 60.0f;  // m/s
+    if (!config.worldTrack.empty() && !config.gameDir.empty()) {
+        auto ts = formats::TrackStreamer::open(config.gameDir, config.worldTrack);
+        if (ts) {
+            world.reset(new formats::TrackStreamer(ts.take()));
+            loadTexturesFrom(world->masterBundle(), &worldGlobal);
+            flyPos[0] = world->sections()[0].centre[0];
+            flyPos[1] = world->sections()[0].centre[1];
+        } else {
+            OMW05_LOG_ERROR("app", "--world: %s", ts.error().message.c_str());
+        }
+    }
+
     OMW05_LOG_INFO("app", "viewer up: %dx%d physical, %dx%d logical, rotate=%d, scale=%.2f", physW,
                    physH, logiW, logiH, static_cast<int>(rotation), renderScale);
 
@@ -463,12 +557,23 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
                        event.button.button == SDL_BUTTON_LEFT) {
                 orbiting = false;
             } else if (event.type == SDL_MOUSEMOTION && orbiting) {
-                camera.yaw -= static_cast<float>(event.motion.xrel) * 0.01f;
-                camera.pitch += static_cast<float>(event.motion.yrel) * 0.01f;
-                camera.clampPitch();
+                if (world) {
+                    flyYaw -= static_cast<float>(event.motion.xrel) * 0.005f;
+                    flyPitch -= static_cast<float>(event.motion.yrel) * 0.005f;
+                    flyPitch = std::max(-1.5f, std::min(1.5f, flyPitch));
+                } else {
+                    camera.yaw -= static_cast<float>(event.motion.xrel) * 0.01f;
+                    camera.pitch += static_cast<float>(event.motion.yrel) * 0.01f;
+                    camera.clampPitch();
+                }
             } else if (event.type == SDL_MOUSEWHEEL) {
-                camera.distance *= std::pow(0.9f, static_cast<float>(event.wheel.y));
-                camera.distance = std::max(camera.distance, 0.05f);
+                if (world) {
+                    flySpeed *= std::pow(1.2f, static_cast<float>(event.wheel.y));
+                    flySpeed = std::max(1.0f, std::min(500.0f, flySpeed));
+                } else {
+                    camera.distance *= std::pow(0.9f, static_cast<float>(event.wheel.y));
+                    camera.distance = std::max(camera.distance, 0.05f);
+                }
             } else if (event.type == SDL_KEYDOWN) {
                 switch (event.key.keysym.sym) {
                 case SDLK_ESCAPE:
@@ -504,10 +609,105 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
             return !r1 ? r1.error() : r2.error();
         }
 
+        // --- M4 world: fly movement + streaming by camera position. ---
+        if (world) {
+            const Uint8* keys = SDL_GetKeyboardState(nullptr);
+            const float dt = std::min(frameMs / 1000.0f, 0.1f);
+            const float cy = std::cos(flyYaw);
+            const float sy = std::sin(flyYaw);
+            const float cp = std::cos(flyPitch);
+            const float fwd[3] = {cp * cy, cp * sy, std::sin(flyPitch)};
+            const float right[3] = {sy, -cy, 0};
+            float move[3] = {0, 0, 0};
+            auto add = [&move](const float* v, float s) {
+                for (int i = 0; i < 3; ++i) {
+                    move[i] += v[i] * s;
+                }
+            };
+            bool keysFree = true;
+#if defined(OMW05_WITH_IMGUI)
+            keysFree = !ImGui::GetIO().WantCaptureKeyboard;
+#endif
+            if (keysFree) {
+                if (keys[SDL_SCANCODE_W]) add(fwd, 1);
+                if (keys[SDL_SCANCODE_S]) add(fwd, -1);
+                if (keys[SDL_SCANCODE_D]) add(right, 1);
+                if (keys[SDL_SCANCODE_A]) add(right, -1);
+                if (keys[SDL_SCANCODE_E]) move[2] += 1;
+                if (keys[SDL_SCANCODE_Q]) move[2] -= 1;
+            }
+            for (int i = 0; i < 3; ++i) {
+                flyPos[i] += move[i] * flySpeed * dt;
+            }
+
+            // Load nearby sections, evict far ones (simple distance policy;
+            // proper LRU/frustum: TODO).
+            const auto& secs = world->sections();
+            for (std::size_t i = 0; i < secs.size(); ++i) {
+                const float dx = flyPos[0] - secs[i].centre[0];
+                const float dy = flyPos[1] - secs[i].centre[1];
+                const float d2 = dx * dx + dy * dy;
+                const float loadR = secs[i].radius + 300.0f;
+                const float evictR = secs[i].radius + 600.0f;
+                const bool loaded = worldSections.count(static_cast<int>(i)) != 0;
+                if (!loaded && d2 < loadR * loadR && worldSections.size() < 24) {
+                    worldSections.emplace(static_cast<int>(i),
+                                          loadWorldSection(*world, secs[i]));
+                } else if (loaded && d2 > evictR * evictR) {
+                    worldSections.erase(static_cast<int>(i));
+                }
+            }
+        }
+
         // --- Scene pass into sceneRT (§5a). ---
         sceneRT.bind();
         glClearColor(0.08f, 0.12f, 0.20f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        if (world) {
+            glEnable(GL_DEPTH_TEST);
+            glDisable(GL_BLEND);
+            sceneShader.use();
+            float view[16];
+            float proj[16];
+            float viewProj[16];
+            const float center[3] = {flyPos[0] + std::cos(flyPitch) * std::cos(flyYaw),
+                                     flyPos[1] + std::cos(flyPitch) * std::sin(flyYaw),
+                                     flyPos[2] + std::sin(flyPitch)};
+            const float up[3] = {0, 0, 1};
+            gfx::mat4LookAt(flyPos, center, up, view);
+            gfx::mat4Perspective(1.1f,
+                                 static_cast<float>(sceneRT.width()) /
+                                     static_cast<float>(sceneRT.height()),
+                                 0.5f, 6000.0f, proj);
+            gfx::mat4Multiply(proj, view, viewProj);
+            glUniformMatrix4fv(locViewProj, 1, GL_FALSE, viewProj);
+            glUniform1i(locDiffuse, 0);
+            glActiveTexture(GL_TEXTURE0);
+            for (const auto& entry : worldSections) {
+                const WorldSection& section = entry.second;
+                for (const WorldInstance& inst : section.instances) {
+                    const Model& model =
+                        section.assets.models[static_cast<std::size_t>(inst.modelIndex)];
+                    glUniformMatrix4fv(locModel, 1, GL_FALSE, inst.transform);
+                    for (const ModelPart& part : model.parts) {
+                        auto it = section.assets.textureByHash.find(part.diffuseHash);
+                        if (it == section.assets.textureByHash.end()) {
+                            it = worldGlobal.textureByHash.find(part.diffuseHash);
+                            if (it == worldGlobal.textureByHash.end()) {
+                                glUniform1i(locHasTexture, 0);
+                                part.mesh.draw();
+                                continue;
+                            }
+                        }
+                        glBindTexture(GL_TEXTURE_2D, it->second);
+                        glUniform1i(locHasTexture, 1);
+                        part.mesh.draw();
+                    }
+                }
+            }
+            glDisable(GL_DEPTH_TEST);
+        }
 
         const std::vector<int> drawList = buildDrawList();
         if (needFrame) {
@@ -609,6 +809,18 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
                     }
                     ImGui::PopID();
                 }
+                ImGui::End();
+            }
+
+            if (world) {  // M4 world status
+                ImGui::SetNextWindowPos(ImVec2(10, 160), ImGuiCond_FirstUseEver);
+                ImGui::Begin("World");
+                ImGui::Text("pos: %.0f %.0f %.0f", static_cast<double>(flyPos[0]),
+                            static_cast<double>(flyPos[1]), static_cast<double>(flyPos[2]));
+                ImGui::Text("sections loaded: %zu / %zu", worldSections.size(),
+                            world->sections().size());
+                ImGui::SliderFloat("speed", &flySpeed, 1.0f, 500.0f, "%.0f m/s");
+                ImGui::Text("WASD move, QE up/down, drag look, wheel speed");
                 ImGui::End();
             }
 
