@@ -25,6 +25,11 @@ if(OMW05_WITH_IMGUI AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/imgui/imgui.h)
     target_compile_definitions(omw05_imgui PUBLIC IMGUI_IMPL_OPENGL_ES3)
     find_package(SDL2 REQUIRED)
     target_link_libraries(omw05_imgui PUBLIC SDL2::SDL2)
+    # With IMGUI_IMPL_OPENGL_ES3 the backend calls GLES entry points directly
+    # (no embedded loader), so it needs the system GLES 3.0 library (ANGLE's
+    # libGLESv2 on Windows).
+    find_library(OMW05_GLES2_LIBRARY NAMES GLESv2 libGLESv2 REQUIRED)
+    target_link_libraries(omw05_imgui PUBLIC ${OMW05_GLES2_LIBRARY})
     add_library(omw05::imgui ALIAS omw05_imgui)
 endif()
 

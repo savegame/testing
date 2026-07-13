@@ -26,6 +26,7 @@ public:
     ~GlContext();
 
     SDL_Window* window() const { return window_; }
+    void* glHandle() const { return glContext_; }  // SDL_GLContext
 
     // Physical drawable size in pixels (may differ from window size on HiDPI).
     void drawableSize(int* width, int* height) const;
