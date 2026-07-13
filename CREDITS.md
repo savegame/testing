@@ -12,6 +12,8 @@ below.
   (`.BIN`/`.BUN`/`.LZC`) reader/writer.
 - **heyitsleo & nfs-tools contributors** — NFS-ModTools and related tooling;
   geometry/texture/track chunk parsing and streaming-section documentation.
+  The MW solid geometry parser (`formats/Solids`) follows the layouts
+  documented by NFS-ModTools' SolidReader/MostWantedSolidReader.
 - **berkayylmao** — NFSPluginSDK, reverse-engineered Blackbox-era struct
   layouts.
 - **dbalatoni13 & contributors** — nfsmw matching decompilation (GameCube),
