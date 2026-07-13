@@ -77,6 +77,7 @@ struct ViewerAssets {
     std::vector<BrowserTexture> textures;
     std::vector<Model> models;
     std::unordered_map<std::uint32_t, std::uint32_t> textureByHash;  // binHash -> GL id
+    std::unordered_map<std::uint32_t, int> modelByHash;              // solid hash -> index
 };
 
 void loadTexturesFrom(core::ByteSpan span, ViewerAssets* assets) {
@@ -147,6 +148,7 @@ void loadModelsFrom(core::ByteSpan span, ViewerAssets* assets) {
                 }
             }
             if (!model.parts.empty()) {
+                assets->modelByHash[obj.hash] = static_cast<int>(assets->models.size());
                 assets->models.push_back(std::move(model));
             }
         }
@@ -221,7 +223,6 @@ struct WorldInstance {
 
 struct WorldSection {
     ViewerAssets assets;
-    std::unordered_map<std::uint32_t, int> modelByHash;
     std::vector<WorldInstance> instances;
 };
 
@@ -239,19 +240,6 @@ WorldSection loadWorldSection(const formats::TrackStreamer& ts,
     core::ByteSpan span(data.value().data(), data.value().size());
     loadTexturesFrom(span, &out.assets);
     loadModelsFrom(span, &out.assets);
-    // solid hash -> model index (loadModelsFrom keeps object order)
-    auto solids = formats::parseSolidLists(span);
-    if (solids) {
-        int idx = 0;
-        for (const auto& list : solids.value()) {
-            for (const auto& obj : list.objects) {
-                if (obj.materials.empty()) {
-                    continue;  // skipped by loadModelsFrom
-                }
-                out.modelByHash[obj.hash] = idx++;
-            }
-        }
-    }
     auto scenery = formats::parseScenerySections(span);
     if (scenery) {
         for (const auto& sc : scenery.value()) {
@@ -262,8 +250,8 @@ WorldSection loadWorldSection(const formats::TrackStreamer& ts,
                 }
                 const formats::SceneryInfo& info =
                     sc.infos[static_cast<std::size_t>(inst.sceneryInfoNumber)];
-                auto it = out.modelByHash.find(info.modelHash[0]);
-                if (it == out.modelByHash.end()) {
+                auto it = out.assets.modelByHash.find(info.modelHash[0]);
+                if (it == out.assets.modelByHash.end()) {
                     continue;  // model lives in another section/global bundle
                 }
                 WorldInstance wi;
@@ -709,7 +697,7 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
             glDisable(GL_DEPTH_TEST);
         }
 
-        const std::vector<int> drawList = buildDrawList();
+        const std::vector<int> drawList = world ? std::vector<int>() : buildDrawList();
         if (needFrame) {
             frameModels(drawList);
             needFrame = false;
@@ -821,6 +809,31 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
                             world->sections().size());
                 ImGui::SliderFloat("speed", &flySpeed, 1.0f, 500.0f, "%.0f m/s");
                 ImGui::Text("WASD move, QE up/down, drag look, wheel speed");
+                ImGui::Separator();
+                ImGui::Text("nearest sections (teleport):");
+                std::vector<std::pair<float, int>> nearest;
+                const auto& allSecs = world->sections();
+                for (std::size_t i = 0; i < allSecs.size(); ++i) {
+                    const float dx = flyPos[0] - allSecs[i].centre[0];
+                    const float dy = flyPos[1] - allSecs[i].centre[1];
+                    nearest.push_back({dx * dx + dy * dy, static_cast<int>(i)});
+                }
+                std::sort(nearest.begin(), nearest.end());
+                ImGui::BeginChild("seclist", ImVec2(0, 220));
+                for (std::size_t i = 0; i < nearest.size() && i < 20; ++i) {
+                    const auto& sec = allSecs[static_cast<std::size_t>(nearest[i].second)];
+                    const bool loaded = worldSections.count(nearest[i].second) != 0;
+                    char lbl[96];
+                    std::snprintf(lbl, sizeof lbl, "%-6s %5.0fm %s##sec%d", sec.name.c_str(),
+                                  static_cast<double>(std::sqrt(nearest[i].first)),
+                                  loaded ? "[loaded]" : "", nearest[i].second);
+                    if (ImGui::Selectable(lbl)) {
+                        flyPos[0] = sec.centre[0];
+                        flyPos[1] = sec.centre[1];
+                        flyPos[2] = 60.0f;
+                    }
+                }
+                ImGui::EndChild();
                 ImGui::End();
             }
 
