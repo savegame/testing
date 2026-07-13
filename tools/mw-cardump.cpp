@@ -132,9 +132,21 @@ int main(int argc, char** argv) {
                             resolved.c_str());
             }
             if (showMarkers) {
+                // Known marker names (binHash-verified against real data).
+                auto markerName = [](std::uint32_t h) -> const char* {
+                    switch (h) {
+                    case 0x9DB90133u: return "LEFT_HEADLIGHT";
+                    case 0xD09091C6u: return "RIGHT_HEADLIGHT";
+                    case 0x31A66786u: return "LEFT_BRAKELIGHT";
+                    case 0xBF700A79u: return "RIGHT_BRAKELIGHT";
+                    case 0xBCF8A18Bu: return "LEFT_EXHAUST";
+                    case 0xBD7CF15Eu: return "RIGHT_EXHAUST";
+                    default: return "?";
+                    }
+                };
                 for (const auto& m : obj.markers) {
-                    std::printf("  marker 0x%08X i=%d f=(%.2f,%.2f) pos=(%.3f, %.3f, %.3f)\n",
-                                m.nameHash, m.iParam, static_cast<double>(m.fParam0),
+                    std::printf("  marker 0x%08X %-18s i=%d f=(%.2f,%.2f) pos=(%.3f, %.3f, %.3f)\n",
+                                m.nameHash, markerName(m.nameHash), m.iParam, static_cast<double>(m.fParam0),
                                 static_cast<double>(m.fParam1),
                                 static_cast<double>(m.matrix[12]),
                                 static_cast<double>(m.matrix[13]),

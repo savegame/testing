@@ -319,7 +319,8 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
     int carSelected = -1;
     float uiScale = config.uiScale;
     bool needFrame = false;   // re-frame the camera on next draw-list build
-    bool placeWheels = true;  // replicate WHEEL models over position markers
+    bool placeWheels = false;  // markers are lights/exhausts; real wheel
+                              // positions come from VLT pvehicle data (M5)
     std::vector<char> visible;  // per-model draw checkbox state
 
     // Preset: show only parts of one LOD (plus suffixless objects).
@@ -344,6 +345,9 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
                 n.find("STYLE") == std::string::npos) {
                 if (assets.models[i].isWheel) {
                     on = true;
+                } else if (n.find("_BASE_") != std::string::npos &&
+                           n.find("_KIT") == std::string::npos) {
+                    on = true;  // glass/base shell
                 } else if (n.find("_KIT00_") != std::string::npos) {
                     const bool isHood = n.find("HOOD") != std::string::npos;
                     const bool isExtra = n.find("DECAL") != std::string::npos ||
@@ -636,7 +640,7 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
                 if (ImGui::Button("Frame")) {
                     needFrame = true;
                 }
-                ImGui::Checkbox("place wheels at markers", &placeWheels);
+                ImGui::Checkbox("place wheels at markers (wrong until VLT/M5)", &placeWheels);
                 ImGui::Text("objects: %zu, textures: %zu", assets.models.size(),
                             assets.textures.size());
                 ImGui::Separator();
