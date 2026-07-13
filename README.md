@@ -19,8 +19,8 @@ game; the engine reads its files at runtime from a directory you point it at
 | Milestone | Description | Status |
 |---|---|---|
 | M0 | Skeleton: window, ES 3.0 context, offscreen RTs + compositor (`--rotate`, `--render-scale`), ImGui, logging | ✅ |
-| M1 | Chunk layer: ChunkReader, chunk IDs, RefPack + JDLZ, hashes, `mw-chunkdump` | 🚧 in progress |
-| M2 | Textures: texture pack parser, CPU DXT decode, `mw-texdump`, texture browser | ⬜ |
+| M1 | Chunk layer: ChunkReader, chunk IDs, RefPack + JDLZ, hashes, `mw-chunkdump` | ✅ |
+| M2 | Textures: texture pack parser, CPU DXT decode, `mw-texdump`, texture browser | 🚧 in progress |
 | M3 | Solids: geometry parser, `mw-solid2gltf`, in-engine model viewer | ⬜ |
 | M4 | World: track streaming, free camera over Rockport | ⬜ |
 | M5 | Data layer: VLT (`mw-vltdump`), language packs, FNG/collision/NIS stubs | ⬜ |
