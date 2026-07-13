@@ -2,6 +2,7 @@
 add_executable(omw05-tests
     main.cpp
     test_core.cpp
+    test_io_chunks.cpp
 )
 target_link_libraries(omw05-tests PRIVATE omw05::core omw05::io omw05::doctest)
 omw05_set_warnings(omw05-tests)
