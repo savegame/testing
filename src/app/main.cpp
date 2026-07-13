@@ -14,6 +14,7 @@ void printUsage() {
     std::printf(
         "usage: omw05-viewer [options]\n"
         "  --gamedir <path>       NFS:MW (2005, PC) install dir (env OMW05_GAMEDIR)\n"
+        "  --open <file>          open a chunked file in the texture browser\n"
         "  --rotate <0|90|180|270> presentation rotation (env OMW05_ROTATE)\n"
         "  --render-scale <f>     3D render scale, 0.25..1.0 (UI stays native)\n"
         "  --no-vsync             disable vsync\n"
@@ -65,6 +66,9 @@ int main(int argc, char** argv) {
             config.vsync = false;
         } else if (!std::strcmp(arg, "--gamedir") && value) {
             config.gameDir = value;
+            ++i;
+        } else if (!std::strcmp(arg, "--open") && value) {
+            config.openFile = value;
             ++i;
         } else if (!std::strcmp(arg, "--rotate") && value) {
             if (!omw05::gfx::rotationFromDegrees(std::atoi(value), &config.rotation)) {

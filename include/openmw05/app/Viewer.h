@@ -17,7 +17,8 @@ struct ViewerConfig {
     gfx::Rotation rotation = gfx::Rotation::Deg0;  // --rotate / OMW05_ROTATE
     float renderScale = 1.0f;                      // --render-scale, 3D-only (§5a)
     bool vsync = true;
-    std::string gameDir;  // may be empty at M0; validated when set (§7)
+    std::string gameDir;   // may be empty at M0; validated when set (§7)
+    std::string openFile;  // --open: chunked file to browse (M2 texture browser)
 };
 
 class Viewer {

@@ -1,15 +1,21 @@
 #include "openmw05/app/Viewer.h"
 
 #include "openmw05/core/Log.h"
+#include "openmw05/core/Stream.h"
+#include "openmw05/formats/TexturePack.h"
+#include "openmw05/gfx/DxtDecode.h"
 #include "openmw05/gfx/GlContext.h"
 #include "openmw05/gfx/ImGuiLayer.h"
 #include "openmw05/gfx/RenderTarget.h"
+#include "openmw05/gfx/Texture.h"
+#include "openmw05/io/Compression.h"
 
 #include <SDL.h>
 #include <glad/gles2.h>
 
 #include <algorithm>
 #include <sys/stat.h>
+#include <vector>
 
 #if defined(OMW05_WITH_IMGUI)
 #include <imgui.h>
@@ -30,6 +36,76 @@ int scaledDim(int logical, float scale) {
 }
 
 const float kRenderScaleSteps[] = {1.0f, 0.75f, 0.5f};
+
+// A decoded + uploaded texture for the M2 in-engine browser.
+struct BrowserTexture {
+    std::string label;
+    gfx::Texture texture;
+};
+
+// Loads a chunked file, parses texture packs, decodes what we can and
+// uploads to GL. Unsupported formats are listed in the log and skipped.
+std::vector<BrowserTexture> loadTextureBrowser(const std::string& path) {
+    std::vector<BrowserTexture> out;
+    auto file = core::readFile(path);
+    if (!file) {
+        OMW05_LOG_ERROR("app", "--open: %s", file.error().message.c_str());
+        return out;
+    }
+    static std::vector<std::uint8_t> bytes;  // keep alive: pack spans alias it
+    bytes = file.take();
+    core::ByteSpan span(bytes.data(), bytes.size());
+    auto d = io::decompressAuto(span);
+    if (d.ok()) {
+        bytes = d.take();
+        span = core::ByteSpan(bytes.data(), bytes.size());
+    }
+    auto packs = formats::parseTexturePacks(span);
+    if (!packs) {
+        OMW05_LOG_ERROR("app", "--open: %s", packs.error().message.c_str());
+        return out;
+    }
+    using TF = formats::TextureFormat;
+    for (const auto& pack : packs.value()) {
+        for (const auto& tex : pack.textures) {
+            std::vector<std::uint8_t> rgba;
+            switch (tex.textureFormat()) {
+            case TF::Dxt1:
+                rgba = gfx::decodeDxt(tex.data, tex.width, tex.height, 1);
+                break;
+            case TF::Dxt3:
+                rgba = gfx::decodeDxt(tex.data, tex.width, tex.height, 3);
+                break;
+            case TF::Dxt5:
+                rgba = gfx::decodeDxt(tex.data, tex.width, tex.height, 5);
+                break;
+            case TF::Rgba32:
+                if (tex.data.size() >= static_cast<std::size_t>(tex.width) * tex.height * 4) {
+                    rgba.assign(tex.data.begin(),
+                                tex.data.begin() +
+                                    static_cast<std::size_t>(tex.width) * tex.height * 4);
+                    for (std::size_t i = 0; i + 3 < rgba.size(); i += 4) {  // BGRA -> RGBA
+                        std::swap(rgba[i], rgba[i + 2]);
+                    }
+                }
+                break;
+            default:
+                OMW05_LOG_DEBUG("app", "skip '%s': unsupported format %u", tex.name.c_str(),
+                                tex.format);
+                break;
+            }
+            if (rgba.empty()) {
+                continue;
+            }
+            auto gl = gfx::Texture::createRgba8(tex.width, tex.height, rgba.data());
+            if (gl) {
+                out.push_back({pack.name + "/" + tex.name, gl.take()});
+            }
+        }
+    }
+    OMW05_LOG_INFO("app", "--open: %zu texture(s) loaded from %s", out.size(), path.c_str());
+    return out;
+}
 
 } // namespace
 
@@ -89,6 +165,12 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
     gfx::Compositor compositor = compResult.take();
 
     gfx::ImGuiLayer imgui = gfx::ImGuiLayer::create(gl.window(), gl.glHandle());
+
+    std::vector<BrowserTexture> browser;
+    if (!config.openFile.empty()) {
+        browser = loadTextureBrowser(config.openFile);
+    }
+    int browserSelected = -1;
 
     OMW05_LOG_INFO("app", "viewer up: %dx%d physical, %dx%d logical, rotate=%d, scale=%.2f", physW,
                    physH, logiW, logiH, static_cast<int>(rotation), renderScale);
@@ -169,6 +251,36 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
                 ImGui::Text("gamedir: %s", config.gameDir.c_str());
             }
             ImGui::End();
+
+            if (!browser.empty()) {  // M2 texture browser
+                ImGui::SetNextWindowPos(ImVec2(10, 160), ImGuiCond_FirstUseEver);
+                ImGui::SetNextWindowSize(ImVec2(420, 400), ImGuiCond_FirstUseEver);
+                ImGui::Begin("Texture browser");
+                ImGui::BeginChild("list", ImVec2(180, 0), ImGuiChildFlags_ResizeX);
+                for (int i = 0; i < static_cast<int>(browser.size()); ++i) {
+                    if (ImGui::Selectable(browser[static_cast<std::size_t>(i)].label.c_str(),
+                                          browserSelected == i)) {
+                        browserSelected = i;
+                    }
+                }
+                ImGui::EndChild();
+                ImGui::SameLine();
+                ImGui::BeginChild("preview");
+                if (browserSelected >= 0 && browserSelected < static_cast<int>(browser.size())) {
+                    const gfx::Texture& t =
+                        browser[static_cast<std::size_t>(browserSelected)].texture;
+                    ImGui::Text("%dx%d", t.width(), t.height());
+                    const float avail = ImGui::GetContentRegionAvail().x;
+                    const float scaleTo =
+                        t.width() > 0 ? std::min(1.0f, avail / static_cast<float>(t.width()))
+                                      : 1.0f;
+                    ImGui::Image(static_cast<ImTextureID>(t.id()),
+                                 ImVec2(static_cast<float>(t.width()) * scaleTo,
+                                        static_cast<float>(t.height()) * scaleTo));
+                }
+                ImGui::EndChild();
+                ImGui::End();
+            }
         }
 #endif
         imgui.endFrame(uiRT);
