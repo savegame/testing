@@ -1,6 +1,12 @@
 # Vendored third-party dependencies ONLY (see CLAUDE.md §4 and THIRD_PARTY.md).
 # SDL2 comes from the system via find_package, not from here.
 
+# glad loader generated for the GLES2 API at version 3.0 — the only GL API
+# surface this project may use (CLAUDE.md §2).
+add_library(omw05_glad STATIC glad/src/gles2.c)
+target_include_directories(omw05_glad SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/glad/include)
+add_library(omw05::glad ALIAS omw05_glad)
+
 if(OMW05_WITH_IMGUI AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/imgui/imgui.h)
     add_library(omw05_imgui STATIC
         imgui/imgui.cpp

@@ -6,6 +6,7 @@
 // Error{code, message}. `Result<void>` is supported for pure status returns.
 
 #include <cassert>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -43,15 +44,15 @@ public:
     // Value access: only valid when ok().
     T& value() {
         assert(ok_);
-        return value_;
+        return *value_;
     }
     const T& value() const {
         assert(ok_);
-        return value_;
+        return *value_;
     }
     T&& take() {
         assert(ok_);
-        return std::move(value_);
+        return std::move(*value_);
     }
 
     // Error access: only valid when !ok().
@@ -62,7 +63,7 @@ public:
 
 private:
     bool ok_;
-    T value_{};
+    std::optional<T> value_;  // optional so T need not be default-constructible
     Error error_{};
 };
 

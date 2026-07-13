@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(openmw05 CXX)
+project(openmw05 C CXX)  # C is needed only for the vendored glad loader
 
 # Hard constraint (CLAUDE.md §2): C++17, strictly.
 set(CMAKE_CXX_STANDARD 17)
