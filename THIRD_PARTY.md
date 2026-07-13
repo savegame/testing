@@ -9,5 +9,6 @@ are credited in `CREDITS.md` and cited inline in headers/docs.
 | Dear ImGui | https://github.com/ocornut/imgui | v1.91.9b (f5befd2d29e66809cd1110a152e375a7f1981f06) | MIT | Core library + SDL2 platform backend + OpenGL3/GLES3 renderer backend, vendored in `extern/imgui/` |
 | glad (generated loader) | https://github.com/Dav1dde/glad (glad2 generator v2.0.8) | generated for `gles2` API 3.0, core, no extensions beyond registry defaults | (WTFPL OR CC0-1.0) AND Apache-2.0 | Generated GLES 3.0 function loader, vendored in `extern/glad/` |
 | Nikki (ported data) | https://github.com/MaxHwoy/Nikki | master (fetched 2026-07-13) | MIT | bChunk ID table ported from Nikki/Reflection/Enum/BinBlockID.cs into `include/openmw05/io/ChunkIds.h`; BinHash algorithm reference (Nikki/Utils/Hashing.cs) |
+| stb_image_write | https://github.com/nothings/stb | v1.16 | public domain / MIT (dual) | Single-header PNG writer, vendored in `extern/stb/`, used by mw-texdump |
 | doctest | https://github.com/doctest/doctest | v2.4.11 | MIT | Single-header test framework, vendored in `extern/doctest/` |
 | VaultLib (ported code) | https://github.com/NFSTools/VaultLib | master (fetched 2026-07-13) | MIT ((c) 2019 NFS Tools & heyitsleo) | VLT 32/64-bit hash algorithms ported C#→C++ into `src/core/Hash.cpp` (VLT32Hasher.cs, VLT64Hasher.cs) |
