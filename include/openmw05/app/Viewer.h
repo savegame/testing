@@ -6,6 +6,7 @@
 #include "openmw05/gfx/Compositor.h"
 
 #include <string>
+#include <vector>
 
 namespace omw05 {
 namespace app {
@@ -17,8 +18,14 @@ struct ViewerConfig {
     gfx::Rotation rotation = gfx::Rotation::Deg0;  // --rotate / OMW05_ROTATE
     float renderScale = 1.0f;                      // --render-scale, 3D-only (§5a)
     bool vsync = true;
-    std::string gameDir;   // may be empty at M0; validated when set (§7)
-    std::string openFile;  // --open: chunked file to browse (M2 texture browser)
+    std::string gameDir;  // may be empty at M0; validated when set (§7)
+    // --open (repeatable): chunked files to load — texture packs feed the
+    // browser (M2), geometry feeds the model viewer (M3). Textures and
+    // models from the same invocation are matched by bin hash.
+    std::vector<std::string> openFiles;
+    // --screenshot: write a PNG of the composited output after a few frames
+    // (debug/CI aid; the viewer keeps running).
+    std::string screenshotPath;
 };
 
 class Viewer {

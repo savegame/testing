@@ -21,8 +21,8 @@ game; the engine reads its files at runtime from a directory you point it at
 | M0 | Skeleton: window, ES 3.0 context, offscreen RTs + compositor (`--rotate`, `--render-scale`), ImGui, logging | ✅ |
 | M1 | Chunk layer: ChunkReader, chunk IDs, RefPack + JDLZ, hashes, `mw-chunkdump` | ✅ |
 | M2 | Textures: texture pack parser, CPU DXT decode, `mw-texdump`, texture browser | ✅ |
-| M3 | Solids: geometry parser, `mw-solid2gltf`, in-engine model viewer | ⬜ next |
-| M4 | World: track streaming, free camera over Rockport | ⬜ |
+| M3 | Solids: geometry parser, `mw-solid2gltf`, in-engine model viewer | ✅ |
+| M4 | World: track streaming, free camera over Rockport | 🚧 in progress |
 | M5 | Data layer: VLT (`mw-vltdump`), language packs, FNG/collision/NIS stubs | ⬜ |
 
 ## Building

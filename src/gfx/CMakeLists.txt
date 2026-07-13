@@ -7,6 +7,7 @@ add_library(omw05_gfx STATIC
     RenderTarget.cpp
     Compositor.cpp
     Texture.cpp
+    Mesh.cpp
     ImGuiLayer.cpp
 )
 target_include_directories(omw05_gfx PUBLIC ${OMW05_INCLUDE_DIR})

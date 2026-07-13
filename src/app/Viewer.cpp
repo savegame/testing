@@ -2,19 +2,28 @@
 
 #include "openmw05/core/Log.h"
 #include "openmw05/core/Stream.h"
+#include "openmw05/formats/Solids.h"
 #include "openmw05/formats/TexturePack.h"
+#include "openmw05/gfx/Camera.h"
 #include "openmw05/gfx/DxtDecode.h"
 #include "openmw05/gfx/GlContext.h"
 #include "openmw05/gfx/ImGuiLayer.h"
+#include "openmw05/gfx/Mesh.h"
 #include "openmw05/gfx/RenderTarget.h"
+#include "openmw05/gfx/Shader.h"
 #include "openmw05/gfx/Texture.h"
 #include "openmw05/io/Compression.h"
 
 #include <SDL.h>
 #include <glad/gles2.h>
 
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include <stb_image_write.h>
+
 #include <algorithm>
+#include <cmath>
 #include <sys/stat.h>
+#include <unordered_map>
 #include <vector>
 
 #if defined(OMW05_WITH_IMGUI)
@@ -40,30 +49,35 @@ const float kRenderScaleSteps[] = {1.0f, 0.75f, 0.5f};
 // A decoded + uploaded texture for the M2 in-engine browser.
 struct BrowserTexture {
     std::string label;
+    std::uint32_t nameHash;
     gfx::Texture texture;
 };
 
-// Loads a chunked file, parses texture packs, decodes what we can and
-// uploads to GL. Unsupported formats are listed in the log and skipped.
-std::vector<BrowserTexture> loadTextureBrowser(const std::string& path) {
-    std::vector<BrowserTexture> out;
-    auto file = core::readFile(path);
-    if (!file) {
-        OMW05_LOG_ERROR("app", "--open: %s", file.error().message.c_str());
-        return out;
-    }
-    static std::vector<std::uint8_t> bytes;  // keep alive: pack spans alias it
-    bytes = file.take();
-    core::ByteSpan span(bytes.data(), bytes.size());
-    auto d = io::decompressAuto(span);
-    if (d.ok()) {
-        bytes = d.take();
-        span = core::ByteSpan(bytes.data(), bytes.size());
-    }
+// GPU-side model data for the M3 model viewer.
+struct ModelPart {
+    gfx::MeshPart mesh;
+    std::uint32_t diffuseHash;
+};
+
+struct Model {
+    std::string name;
+    float boundsMin[3];
+    float boundsMax[3];
+    std::vector<gfx::VertexBuffer> vertexBuffers;
+    std::vector<ModelPart> parts;
+};
+
+struct ViewerAssets {
+    std::vector<BrowserTexture> textures;
+    std::vector<Model> models;
+    std::unordered_map<std::uint32_t, std::uint32_t> textureByHash;  // binHash -> GL id
+};
+
+void loadTexturesFrom(core::ByteSpan span, ViewerAssets* assets) {
     auto packs = formats::parseTexturePacks(span);
     if (!packs) {
-        OMW05_LOG_ERROR("app", "--open: %s", packs.error().message.c_str());
-        return out;
+        OMW05_LOG_ERROR("app", "--open textures: %s", packs.error().message.c_str());
+        return;
     }
     using TF = formats::TextureFormat;
     for (const auto& pack : packs.value()) {
@@ -99,13 +113,122 @@ std::vector<BrowserTexture> loadTextureBrowser(const std::string& path) {
             }
             auto gl = gfx::Texture::createRgba8(tex.width, tex.height, rgba.data());
             if (gl) {
-                out.push_back({pack.name + "/" + tex.name, gl.take()});
+                assets->textureByHash[tex.nameHash] = gl.value().id();
+                assets->textures.push_back({pack.name + "/" + tex.name, tex.nameHash, gl.take()});
             }
         }
     }
-    OMW05_LOG_INFO("app", "--open: %zu texture(s) loaded from %s", out.size(), path.c_str());
-    return out;
 }
+
+void loadModelsFrom(core::ByteSpan span, ViewerAssets* assets) {
+    auto lists = formats::parseSolidLists(span);
+    if (!lists) {
+        OMW05_LOG_ERROR("app", "--open geometry: %s", lists.error().message.c_str());
+        return;
+    }
+    for (const auto& list : lists.value()) {
+        for (const auto& obj : list.objects) {
+            Model model;
+            model.name = obj.name;
+            for (int i = 0; i < 3; ++i) {
+                model.boundsMin[i] = obj.boundsMin[i];
+                model.boundsMax[i] = obj.boundsMax[i];
+            }
+            for (const auto& set : obj.vertexSets) {
+                if (set.empty()) {
+                    // Placeholder so material vertexSetIndex still lines up.
+                    static const formats::SolidVertex kZero{};
+                    auto vb = gfx::VertexBuffer::create(&kZero, sizeof kZero);
+                    if (vb) {
+                        model.vertexBuffers.push_back(vb.take());
+                    }
+                    continue;
+                }
+                auto vb = gfx::VertexBuffer::create(set.data(),
+                                                    set.size() * sizeof(formats::SolidVertex));
+                if (vb) {
+                    model.vertexBuffers.push_back(vb.take());
+                }
+            }
+            for (const auto& mat : obj.materials) {
+                if (mat.indices.empty() || mat.vertexSetIndex >= model.vertexBuffers.size()) {
+                    continue;
+                }
+                auto part = gfx::MeshPart::create(model.vertexBuffers[mat.vertexSetIndex],
+                                                  mat.indices.data(), mat.indices.size());
+                if (part) {
+                    model.parts.push_back({part.take(), mat.diffuseTextureHash});
+                }
+            }
+            if (!model.parts.empty()) {
+                assets->models.push_back(std::move(model));
+            }
+        }
+    }
+}
+
+ViewerAssets loadAssets(const std::vector<std::string>& paths) {
+    ViewerAssets assets;
+    for (const std::string& path : paths) {
+        auto file = core::readFile(path);
+        if (!file) {
+            OMW05_LOG_ERROR("app", "--open: %s", file.error().message.c_str());
+            continue;
+        }
+        std::vector<std::uint8_t> bytes = file.take();
+        core::ByteSpan span(bytes.data(), bytes.size());
+        auto d = io::decompressAuto(span);
+        if (d.ok()) {
+            bytes = d.take();
+            span = core::ByteSpan(bytes.data(), bytes.size());
+        }
+        loadTexturesFrom(span, &assets);
+        loadModelsFrom(span, &assets);
+        // bytes freed here: everything referencing them is on the GPU now.
+    }
+    OMW05_LOG_INFO("app", "--open: %zu texture(s), %zu model(s)", assets.textures.size(),
+                   assets.models.size());
+    return assets;
+}
+
+// GLSL ES 3.00 scene shader: half-lambert, vertex color (BGRA in memory ->
+// swizzle), optional diffuse texture.
+const char* kSceneVs = R"(#version 300 es
+precision highp float;
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec4 aColor;  // B,G,R,A byte order
+layout(location = 3) in vec2 aUv;
+uniform mat4 uViewProj;
+out vec3 vNormal;
+out vec4 vColor;
+out vec2 vUv;
+void main() {
+    gl_Position = uViewProj * vec4(aPos, 1.0);
+    vNormal = aNormal;
+    vColor = vec4(aColor.zyx, aColor.w);
+    vUv = aUv;
+}
+)";
+
+const char* kSceneFs = R"(#version 300 es
+precision highp float;
+in vec3 vNormal;
+in vec4 vColor;
+in vec2 vUv;
+uniform sampler2D uDiffuse;
+uniform int uHasTexture;
+out vec4 oColor;
+void main() {
+    vec3 lightDir = normalize(vec3(0.45, 0.35, 0.82));
+    float ndl = dot(normalize(vNormal), lightDir) * 0.5 + 0.5;  // half-lambert
+    vec4 base = uHasTexture != 0 ? texture(uDiffuse, vUv) : vec4(0.75, 0.75, 0.78, 1.0);
+    if (base.a < 0.35) {
+        discard;
+    }
+    oColor = vec4(base.rgb * vColor.rgb * ndl, 1.0);
+}
+)";
 
 } // namespace
 
@@ -166,11 +289,36 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
 
     gfx::ImGuiLayer imgui = gfx::ImGuiLayer::create(gl.window(), gl.glHandle());
 
-    std::vector<BrowserTexture> browser;
-    if (!config.openFile.empty()) {
-        browser = loadTextureBrowser(config.openFile);
-    }
+    ViewerAssets assets = loadAssets(config.openFiles);
     int browserSelected = -1;
+    int modelSelected = assets.models.empty() ? -1 : 0;
+
+    core::Result<gfx::Shader> sceneShaderResult = gfx::Shader::compile(kSceneVs, kSceneFs);
+    if (!sceneShaderResult) {
+        return sceneShaderResult.error();
+    }
+    gfx::Shader sceneShader = sceneShaderResult.take();
+    const int locViewProj = sceneShader.uniformLocation("uViewProj");
+    const int locDiffuse = sceneShader.uniformLocation("uDiffuse");
+    const int locHasTexture = sceneShader.uniformLocation("uHasTexture");
+
+    gfx::OrbitCamera camera;
+    auto frameModel = [&camera, &assets](int index) {
+        if (index < 0 || index >= static_cast<int>(assets.models.size())) {
+            return;
+        }
+        const Model& m = assets.models[static_cast<std::size_t>(index)];
+        float diag = 0;
+        for (int i = 0; i < 3; ++i) {
+            camera.target[i] = (m.boundsMin[i] + m.boundsMax[i]) * 0.5f;
+            const float d = m.boundsMax[i] - m.boundsMin[i];
+            diag += d * d;
+        }
+        diag = std::sqrt(diag);
+        camera.distance = diag > 0.01f ? diag * 1.2f : 5.0f;
+    };
+    frameModel(modelSelected);
+    bool orbiting = false;
 
     OMW05_LOG_INFO("app", "viewer up: %dx%d physical, %dx%d logical, rotate=%d, scale=%.2f", physW,
                    physH, logiW, logiH, static_cast<int>(rotation), renderScale);
@@ -178,6 +326,7 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
     bool running = true;
     Uint64 prevTicks = SDL_GetPerformanceCounter();
     float frameMs = 0.0f;
+    int frameCount = 0;
 
     while (running) {
         int winW;
@@ -192,6 +341,19 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
             }
             if (event.type == SDL_QUIT) {
                 running = false;
+            } else if (event.type == SDL_MOUSEBUTTONDOWN &&
+                       event.button.button == SDL_BUTTON_LEFT) {
+                orbiting = true;
+            } else if (event.type == SDL_MOUSEBUTTONUP &&
+                       event.button.button == SDL_BUTTON_LEFT) {
+                orbiting = false;
+            } else if (event.type == SDL_MOUSEMOTION && orbiting) {
+                camera.yaw -= static_cast<float>(event.motion.xrel) * 0.01f;
+                camera.pitch += static_cast<float>(event.motion.yrel) * 0.01f;
+                camera.clampPitch();
+            } else if (event.type == SDL_MOUSEWHEEL) {
+                camera.distance *= std::pow(0.9f, static_cast<float>(event.wheel.y));
+                camera.distance = std::max(camera.distance, 0.05f);
             } else if (event.type == SDL_KEYDOWN) {
                 switch (event.key.keysym.sym) {
                 case SDLK_ESCAPE:
@@ -227,10 +389,35 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
             return !r1 ? r1.error() : r2.error();
         }
 
-        // --- Scene pass: M0 just clears to a color inside sceneRT (§5a). ---
+        // --- Scene pass into sceneRT (§5a). ---
         sceneRT.bind();
         glClearColor(0.08f, 0.12f, 0.20f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        if (modelSelected >= 0 && modelSelected < static_cast<int>(assets.models.size())) {
+            const Model& model = assets.models[static_cast<std::size_t>(modelSelected)];
+            glEnable(GL_DEPTH_TEST);
+            glDisable(GL_BLEND);
+            sceneShader.use();
+            float viewProj[16];
+            camera.viewProj(static_cast<float>(sceneRT.width()) /
+                                static_cast<float>(sceneRT.height()),
+                            viewProj);
+            glUniformMatrix4fv(locViewProj, 1, GL_FALSE, viewProj);
+            glUniform1i(locDiffuse, 0);
+            glActiveTexture(GL_TEXTURE0);
+            for (const ModelPart& part : model.parts) {
+                auto it = assets.textureByHash.find(part.diffuseHash);
+                if (it != assets.textureByHash.end()) {
+                    glBindTexture(GL_TEXTURE_2D, it->second);
+                    glUniform1i(locHasTexture, 1);
+                } else {
+                    glUniform1i(locHasTexture, 0);
+                }
+                part.mesh.draw();
+            }
+            glDisable(GL_DEPTH_TEST);
+        }
 
         // --- UI pass into uiRT. ---
         imgui.beginFrame(uiRT);
@@ -252,23 +439,47 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
             }
             ImGui::End();
 
-            if (!browser.empty()) {  // M2 texture browser
+            if (!assets.models.empty()) {  // M3 model viewer controls
                 ImGui::SetNextWindowPos(ImVec2(10, 160), ImGuiCond_FirstUseEver);
+                ImGui::Begin("Model viewer");
+                const std::string& current =
+                    assets.models[static_cast<std::size_t>(modelSelected)].name;
+                if (ImGui::BeginCombo("object", current.c_str())) {
+                    for (int i = 0; i < static_cast<int>(assets.models.size()); ++i) {
+                        if (ImGui::Selectable(
+                                assets.models[static_cast<std::size_t>(i)].name.c_str(),
+                                modelSelected == i)) {
+                            modelSelected = i;
+                            frameModel(i);
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::Text("parts: %zu",
+                            assets.models[static_cast<std::size_t>(modelSelected)].parts.size());
+                ImGui::Text("drag: orbit, wheel: zoom");
+                ImGui::End();
+            }
+
+            if (!assets.textures.empty()) {  // M2 texture browser
+                ImGui::SetNextWindowPos(ImVec2(10, 260), ImGuiCond_FirstUseEver);
                 ImGui::SetNextWindowSize(ImVec2(420, 400), ImGuiCond_FirstUseEver);
                 ImGui::Begin("Texture browser");
                 ImGui::BeginChild("list", ImVec2(180, 0), ImGuiChildFlags_ResizeX);
-                for (int i = 0; i < static_cast<int>(browser.size()); ++i) {
-                    if (ImGui::Selectable(browser[static_cast<std::size_t>(i)].label.c_str(),
-                                          browserSelected == i)) {
+                for (int i = 0; i < static_cast<int>(assets.textures.size()); ++i) {
+                    if (ImGui::Selectable(
+                            assets.textures[static_cast<std::size_t>(i)].label.c_str(),
+                            browserSelected == i)) {
                         browserSelected = i;
                     }
                 }
                 ImGui::EndChild();
                 ImGui::SameLine();
                 ImGui::BeginChild("preview");
-                if (browserSelected >= 0 && browserSelected < static_cast<int>(browser.size())) {
+                if (browserSelected >= 0 &&
+                    browserSelected < static_cast<int>(assets.textures.size())) {
                     const gfx::Texture& t =
-                        browser[static_cast<std::size_t>(browserSelected)].texture;
+                        assets.textures[static_cast<std::size_t>(browserSelected)].texture;
                     ImGui::Text("%dx%d", t.width(), t.height());
                     const float avail = ImGui::GetContentRegionAvail().x;
                     const float scaleTo =
@@ -287,6 +498,20 @@ core::Result<void> Viewer::run(const ViewerConfig& config) {
 
         // --- Composite: the only pass touching the default framebuffer. ---
         compositor.composite(sceneRT, uiRT, rotation, physW, physH);
+
+        if (!config.screenshotPath.empty() && ++frameCount == 3) {
+            std::vector<std::uint8_t> pixels(static_cast<std::size_t>(physW) * physH * 4);
+            glReadPixels(0, 0, physW, physH, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+            stbi_flip_vertically_on_write(1);  // GL rows are bottom-up
+            if (stbi_write_png(config.screenshotPath.c_str(), physW, physH, 4, pixels.data(),
+                               physW * 4)) {
+                OMW05_LOG_INFO("app", "screenshot written to %s",
+                               config.screenshotPath.c_str());
+            } else {
+                OMW05_LOG_ERROR("app", "failed to write %s", config.screenshotPath.c_str());
+            }
+        }
+
         gl.swap();
 
         const Uint64 now = SDL_GetPerformanceCounter();
