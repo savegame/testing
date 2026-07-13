@@ -1,2 +1,8 @@
 # Unit tests on SYNTHETIC data only — never real game files (CLAUDE.md §4).
-# Test framework (doctest) is vendored in extern/doctest with M1.
+add_executable(omw05-tests
+    main.cpp
+    test_core.cpp
+)
+target_link_libraries(omw05-tests PRIVATE omw05::core omw05::io omw05::doctest)
+omw05_set_warnings(omw05-tests)
+add_test(NAME omw05-tests COMMAND omw05-tests)
