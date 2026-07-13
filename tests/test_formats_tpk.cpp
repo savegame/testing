@@ -34,9 +34,8 @@ void putFixedString(std::vector<std::uint8_t>& v, const char* s, std::size_t len
 // Builds a minimal MW-layout TPK with one 4x4 DXT1 texture (layout per
 // docs/formats/texturepacks.md / Nikki).
 std::vector<std::uint8_t> buildSyntheticTpk(const std::vector<std::uint8_t>& dxtBlock) {
-    // InfoPart1 (0x7C bytes)
+    // InfoPart1 (0x7C bytes): u32 version, name, filename, key
     std::vector<std::uint8_t> part1;
-    putLe32(part1, 0x7C);
     putLe32(part1, 8);  // version
     putFixedString(part1, "TESTPACK", 0x1C);
     putFixedString(part1, "tex\\testpack.tpk", 0x40);
@@ -162,6 +161,86 @@ TEST_CASE("parseTexturePacks reads a synthetic MW TPK") {
     auto rgba = gfx::decodeDxt(tex.data, tex.width, tex.height, 1);
     REQUIRE(rgba.size() == 64);
     CHECK(rgba[0] == 255);
+}
+
+TEST_CASE("parseTexturePacks reads a compressed pack via InfoPart3 offslots") {
+    // Blob: 8 bytes of DXT1 + 0x9C trailer (0x7C entry + 0x20 comp info).
+    const std::vector<std::uint8_t> dxtBlock = {0x00, 0xF8, 0x00, 0xF8, 0, 0, 0, 0};
+    std::vector<std::uint8_t> entry;
+    for (int i = 0; i < 0xC; ++i) {
+        entry.push_back(0);
+    }
+    putFixedString(entry, "COMPTEX", 0x18);
+    putLe32(entry, 0xFEED0001);  // binkey
+    putLe32(entry, 0);           // classkey
+    putLe32(entry, 0);           // unknown0
+    putLe32(entry, 0x4000);      // dataOffset (file-relative, ignored: no palette)
+    putLe32(entry, 0);           // paletteOffset
+    putLe32(entry, static_cast<std::uint32_t>(dxtBlock.size()));
+    putLe32(entry, 0);           // paletteSize
+    putLe32(entry, 16);          // area
+    putLe16(entry, 4);
+    putLe16(entry, 4);
+    entry.push_back(2);
+    entry.push_back(2);
+    entry.push_back(34);  // DXT1
+    entry.push_back(0);
+    putLe16(entry, 0);
+    entry.push_back(1);
+    while (entry.size() < 0x9C) {  // pad entry to full 0x9C trailer
+        entry.push_back(0);
+    }
+    std::vector<std::uint8_t> blob = dxtBlock;
+    blob.insert(blob.end(), entry.begin(), entry.end());
+
+    // InfoPart1 (0x7C) + InfoPart3 (one 0x18 slot, flags 0 = raw)
+    std::vector<std::uint8_t> part1;
+    putLe32(part1, 8);
+    putFixedString(part1, "COMPPACK", 0x1C);
+    putFixedString(part1, "tex\\comppack.tpk", 0x40);
+    putLe32(part1, 0);
+    while (part1.size() < 0x7C) {
+        part1.push_back(0);
+    }
+
+    std::vector<std::uint8_t> info;
+    putLe32(info, 0x33310001);
+    putLe32(info, static_cast<std::uint32_t>(part1.size()));
+    info.insert(info.end(), part1.begin(), part1.end());
+    const std::size_t infoBlockSize = 8 + info.size() + 8 + 0x18;  // + InfoPart3 chunk
+    const std::uint32_t absOffset = static_cast<std::uint32_t>(infoBlockSize + 8);  // in DataBlock
+    putLe32(info, 0x33310003);
+    putLe32(info, 0x18);
+    putLe32(info, 0xFEED0001);  // key
+    putLe32(info, absOffset);
+    putLe32(info, static_cast<std::uint32_t>(blob.size()));  // encoded
+    putLe32(info, static_cast<std::uint32_t>(blob.size()));  // decoded
+    info.push_back(0);          // user flags
+    info.push_back(0);          // flags = raw
+    info.push_back(0);
+    info.push_back(0);          // refcount
+    putLe32(info, 0);
+
+    std::vector<std::uint8_t> file;
+    putLe32(file, 0xB3310000);
+    putLe32(file, static_cast<std::uint32_t>(info.size()));
+    file.insert(file.end(), info.begin(), info.end());
+    putLe32(file, 0xB3320000);
+    putLe32(file, static_cast<std::uint32_t>(blob.size()));
+    file.insert(file.end(), blob.begin(), blob.end());
+
+    auto result = formats::parseTexturePacks(core::ByteSpan(file.data(), file.size()));
+    REQUIRE(result.ok());
+    REQUIRE(result.value().size() == 1);
+    const formats::TexturePack& pack = result.value()[0];
+    CHECK(pack.name == "COMPPACK");
+    REQUIRE(pack.textures.size() == 1);
+    const formats::TextureEntry& tex = pack.textures[0];
+    CHECK(tex.name == "COMPTEX");
+    CHECK(tex.nameHash == 0xFEED0001);
+    CHECK(tex.textureFormat() == formats::TextureFormat::Dxt1);
+    REQUIRE(tex.data.size() == dxtBlock.size());
+    CHECK(std::memcmp(tex.data.data(), dxtBlock.data(), dxtBlock.size()) == 0);
 }
 
 TEST_CASE("parseTexturePacks returns empty for non-TPK chunks") {

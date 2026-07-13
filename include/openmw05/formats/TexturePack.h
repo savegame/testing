@@ -9,14 +9,23 @@
 //
 // Layout summary:
 //   TPK_InfoBlock (0xB3310000) container:
-//     TPK_InfoPart1 (0x33310001): u32 headerSize(0x7C), u32 version,
-//       char[0x1C] name, char[0x40] filename, u32 key, rest unknown
+//     TPK_InfoPart1 (0x33310001, 0x7C bytes): u32 version, char[0x1C] name,
+//       char[0x40] filename, u32 key, rest unknown
 //     TPK_InfoPart2 (0x33310002): {u32 hash, u32 0} per texture
+//     TPK_InfoPart3 (0x33310003): compressed-texture offset slots
+//       (0x18 bytes: key, absOffset, encodedSize, decodedSize, flags...) —
+//       present in compressed packs (e.g. CARS/*/TEXTURES.BIN)
 //     TPK_InfoPart4 (0x33310004): 0x7C-byte texture entries (below)
 //     TPK_InfoPart5 (0x33310005): per-texture compression slots (opaque here)
 //   TPK_DataBlock (0xB3320000) container:
 //     TPK_DataPart2 (0x33320002): texture bytes; entry offsets are relative
 //       to payload start + 0x7C (per Nikki TPKBlock.Disassemble)
+//
+// Compressed packs: each InfoPart3 slot points (relative to the InfoBlock
+// chunk header) to a blob that is either raw (flags 0), one JDLZ/RefPack
+// stream (flags 1) or a chain of LZCompressed (0x55441122) blocks (flags 2).
+// The decompressed blob carries the texture bytes followed by a 0x9C
+// trailer: the standard 0x7C entry + 0x20 of compression info.
 
 #include "openmw05/core/Result.h"
 #include "openmw05/core/Span17.h"
@@ -74,6 +83,9 @@ struct TexturePack {
     std::string filename;  // original .tpk path baked into the bundle
     std::uint32_t key = 0; // binHash key of the pack
     std::vector<TextureEntry> textures;
+    // Owned storage for textures that live compressed in the file: entry
+    // spans point in here. Stable across moves; do not copy TexturePack.
+    std::vector<std::vector<std::uint8_t>> decompressed;
 };
 
 // Scans a chunked buffer (whole .BUN/.BIN file or any subrange) for texture
